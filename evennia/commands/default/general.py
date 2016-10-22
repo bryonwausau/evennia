@@ -2,9 +2,10 @@
 General Character commands usually availabe to all characters
 """
 from django.conf import settings
-from evennia.utils import utils, prettytable
-from evennia.commands.default.muxcommand import MuxCommand
+from evennia.utils import utils, evtable
+from evennia.typeclasses.attributes import NickTemplateInvalid
 
+COMMAND_DEFAULT_CLASS = utils.class_from_module(settings.COMMAND_DEFAULT_CLASS)
 
 # limit symbol import for API
 __all__ = ("CmdHome", "CmdLook", "CmdNick",
@@ -12,7 +13,7 @@ __all__ = ("CmdHome", "CmdLook", "CmdNick",
            "CmdSay", "CmdPose", "CmdAccess")
 
 
-class CmdHome(MuxCommand):
+class CmdHome(COMMAND_DEFAULT_CLASS):
     """
     move to your character's home location
 
@@ -35,10 +36,10 @@ class CmdHome(MuxCommand):
         elif home == caller.location:
             caller.msg("You are already home!")
         else:
-            caller.move_to(home)
             caller.msg("There's no place like home ...")
+            caller.move_to(home)
 
-class CmdLook(MuxCommand):
+class CmdLook(COMMAND_DEFAULT_CLASS):
     """
     look at location or object
 
@@ -58,66 +59,59 @@ class CmdLook(MuxCommand):
         """
         Handle the looking.
         """
-        caller = self.caller
-        args = self.args
-        if args:
-            # Use search to handle duplicate/nonexistant results.
-            looking_at_obj = caller.search(args, use_nicks=True)
-            if not looking_at_obj:
+        if not self.args:
+            target = self.caller.location
+            if not target:
+                self.caller.msg("You have no location to look at!")
                 return
         else:
-            looking_at_obj = caller.location
-            if not looking_at_obj:
-                caller.msg("You have no location to look at!")
+            target = self.caller.search(self.args)
+            if not target:
                 return
-
-        if not hasattr(looking_at_obj, 'return_appearance'):
-            # this is likely due to us having a player instead
-            looking_at_obj = looking_at_obj.character
-        if not looking_at_obj.access(caller, "view"):
-            caller.msg("Could not find '%s'." % args)
-            return
-        # get object's appearance
-        caller.msg(looking_at_obj.return_appearance(caller))
-        # the object's at_desc() method.
-        looking_at_obj.at_desc(looker=caller)
+        self.msg(self.caller.at_look(target))
 
 
-class CmdNick(MuxCommand):
+class CmdNick(COMMAND_DEFAULT_CLASS):
     """
     define a personal alias/nick
 
     Usage:
-      nick[/switches] <nickname> [= [<string>]]
-      alias             ''
+      nick[/switches] <string> [= [replacement_string]]
+      nick[/switches] <template> = <replacement_template>
+      nick/delete <string> or number
+      nick/test <test string>
 
     Switches:
-      object   - alias an object
-      player   - alias a player
-      clearall - clear all your aliases
-      list     - show all defined aliases (also "nicks" works)
+      inputline - replace on the inputline (default)
+      object    - replace on object-lookup
+      player    - replace on player-lookup
+      delete    - remove nick by name or by index given by /list
+      clearall  - clear all nicks
+      list      - show all defined aliases (also "nicks" works)
+      test      - test input to see what it matches with
 
     Examples:
       nick hi = say Hello, I'm Sarah!
       nick/object tom = the tall man
-      nick hi              (shows the nick substitution)
-      nick hi =            (removes nick 'hi')
+      nick build $1 $2 = @create/drop $1;$2     - (template)
+      nick tell $1 $2=@page $1=$2               - (template)
 
-    A 'nick' is a personal shortcut you create for your own use. When
-    you enter the nick, the alternative string will be sent instead.
-    The switches control in which situations the substitution will
-    happen. The default is that it will happen when you enter a
-    command. The 'object' and 'player' nick-types kick in only when
-    you use commands that requires an object or player as a target -
-    you can then use the nick to refer to them.
+    A 'nick' is a personal string replacement. Use $1, $2, ... to catch arguments.
+    Put the last $-marker without an ending space to catch all remaining text. You
+    can also use unix-glob matching:
 
-    Note that no objects are actually renamed or changed by this
-    command - the nick is only available to you. If you want to
-    permanently add keywords to an object for everyone to use, you
-    need build privileges and to use the @alias command.
+        * - matches everything
+        ? - matches a single character
+        [seq] - matches all chars in sequence
+        [!seq] - matches everything not in sequence
+
+    Note that no objects are actually renamed or changed by this command - your nicks
+    are only available to you. If you want to permanently add keywords to an object
+    for everyone to use, you need build privileges and the @alias command.
+
     """
     key = "nick"
-    aliases = ["nickname", "nicks", "@nick", "alias"]
+    aliases = ["nickname", "nicks", "@nick", "@nicks", "alias"]
     locks = "cmd:all()"
 
     def func(self):
@@ -125,62 +119,92 @@ class CmdNick(MuxCommand):
 
         caller = self.caller
         switches = self.switches
-        nicks = caller.nicks.get(return_obj=True)
+        nicktypes = [switch for switch in switches if switch in ("object", "player", "inputline")] or ["inputline"]
 
-        if 'list' in switches:
-            if not nicks:
+        nicklist = utils.make_iter(caller.nicks.get(return_obj=True) or [])
+
+        if 'list' in switches or self.cmdstring in ("nicks", "@nicks"):
+
+            if not nicklist:
                 string = "{wNo nicks defined.{n"
             else:
-                table = prettytable.PrettyTable(["{wNickType",
-                                                 "{wNickname",
-                                                 "{wTranslates-to"])
-                for nick in utils.make_iter(nicks):
-                    table.add_row([nick.db_category, nick.db_key, nick.db_strvalue])
+                table = evtable.EvTable("#", "Type", "Nick match", "Replacement")
+                for inum, nickobj in enumerate(nicklist):
+                    _, _, nickvalue, replacement = nickobj.value
+                    table.add_row(str(inum + 1), nickobj.db_category, nickvalue, replacement)
                 string = "{wDefined Nicks:{n\n%s" % table
             caller.msg(string)
             return
+
         if 'clearall' in switches:
             caller.nicks.clear()
-            caller.msg("Cleared all aliases.")
+            caller.msg("Cleared all nicks.")
             return
+
         if not self.args or not self.lhs:
             caller.msg("Usage: nick[/switches] nickname = [realname]")
             return
-        nick = self.lhs
-        real = self.rhs
 
-        if real == nick:
+        nickstring = self.lhs
+        replstring = self.rhs
+        old_nickstring = None
+        old_replstring = None
+
+        if replstring == nickstring:
             caller.msg("No point in setting nick same as the string to replace...")
             return
 
         # check so we have a suitable nick type
-        if not any(True for switch in switches if switch in ("object", "player", "inputline")):
-            switches = ["inputline"]
+        errstring = ""
         string = ""
-        for switch in switches:
-            oldnick = caller.nicks.get(key=nick, category=switch)
-            if not real:
-                if "=" in self.args:
-                    if oldnick:
-                            # clear the alias
-                            string += "\nNick cleared: '{w%s{n' (-> '{w%s{n')." % (nick, oldnick)
-                            caller.nicks.remove(nick, category=switch)
-                    else:
-                        string += "\nNo nick '%s' found, so it could not be removed." % nick
-                else:
-                    string += "\nNick: '{w%s{n'{n -> '{w%s{n'." % (nick, oldnick)
-
+        for nicktype in nicktypes:
+            oldnick = caller.nicks.get(key=nickstring, category=nicktype, return_obj=True)
+            if oldnick:
+                _, _, old_nickstring, old_replstring = oldnick.value
             else:
-                # creating new nick
-                if oldnick:
-                    string += "\nNick '{w%s{n' reset from '{w%s{n' to '{w%s{n'." % (nick, oldnick, real)
+                # no old nick, see if a number was given
+                arg = self.args.lstrip("#")
+                if arg.isdigit():
+                    # we are given a index in nicklist
+                    delindex = int(arg)
+                    if 0 < delindex <= len(nicklist):
+                        oldnick = nicklist[delindex-1]
+                        _, _, old_nickstring, old_replstring = oldnick.value
+                    else:
+                        errstring += "Not a valid nick index."
                 else:
-                    string += "\nNick set: '{w%s{n' -> '{w%s{n'." % (nick, real)
-                caller.nicks.add(nick, real, category=switch)
+                    errstring += "Nick not found."
+
+            if "delete" in switches or "del" in switches:
+                # clear the nick
+                if caller.nicks.has(old_nickstring, category=nicktype):
+                    caller.nicks.remove(old_nickstring, category=nicktype)
+                    string += "\nNick removed: '|w%s|n' -> |w%s|n." % (old_nickstring, old_replstring)
+                else:
+                    errstring += "\nNick '|w%s|n' was not deleted." % old_nickstring
+
+
+            elif replstring:
+                # creating new nick
+                errstring = ""
+                if oldnick:
+                    string += "\nNick '{w%s{n' updated to map to '{w%s{n'." % (old_nickstring, replstring)
+                else:
+                    string += "\nNick '{w%s{n' mapped to '{w%s{n'." % (nickstring, replstring)
+                try:
+                    caller.nicks.add(nickstring, replstring, category=nicktype)
+                except NickTemplateInvalid:
+                    caller.msg("You must use the same $-markers both in the nick and in the replacement.")
+                    return
+            elif old_nickstring and old_replstring:
+                # just looking at the nick
+                string += "\nNick '{w%s{n' maps to '{w%s{n'." % (old_nickstring, old_replstring)
+                errstring = ""
+        string = errstring if errstring else string
         caller.msg(string)
 
 
-class CmdInventory(MuxCommand):
+class CmdInventory(COMMAND_DEFAULT_CLASS):
     """
     view inventory
 
@@ -201,16 +225,14 @@ class CmdInventory(MuxCommand):
         if not items:
             string = "You are not carrying anything."
         else:
-            table = prettytable.PrettyTable(["name", "desc"])
-            table.header = False
-            table.border = False
+            table = evtable.EvTable(border="header")
             for item in items:
-                table.add_row(["{C%s{n" % item.name, item.db.desc and item.db.desc or ""])
+                table.add_row("{C%s{n" % item.name, item.db.desc or "")
             string = "{wYou are carrying:\n%s" % table
         self.caller.msg(string)
 
 
-class CmdGet(MuxCommand):
+class CmdGet(COMMAND_DEFAULT_CLASS):
     """
     pick up something
 
@@ -233,7 +255,6 @@ class CmdGet(MuxCommand):
         if not self.args:
             caller.msg("Get what?")
             return
-        #print "general/get:", caller, caller.location, self.args, caller.location.contents
         obj = caller.search(self.args, location=caller.location)
         if not obj:
             return
@@ -257,7 +278,7 @@ class CmdGet(MuxCommand):
         obj.at_get(caller)
 
 
-class CmdDrop(MuxCommand):
+class CmdDrop(COMMAND_DEFAULT_CLASS):
     """
     drop something
 
@@ -297,7 +318,7 @@ class CmdDrop(MuxCommand):
         obj.at_drop(caller)
 
 
-class CmdGive(MuxCommand):
+class CmdGive(COMMAND_DEFAULT_CLASS):
     """
     give away something to someone
 
@@ -336,7 +357,7 @@ class CmdGive(MuxCommand):
         target.msg("%s gives you %s." % (caller.key, to_give.key))
 
 
-class CmdDesc(MuxCommand):
+class CmdDesc(COMMAND_DEFAULT_CLASS):
     """
     describe yourself
 
@@ -361,7 +382,7 @@ class CmdDesc(MuxCommand):
         self.caller.db.desc = self.args.strip()
         self.caller.msg("You set your description.")
 
-class CmdSay(MuxCommand):
+class CmdSay(COMMAND_DEFAULT_CLASS):
     """
     speak as your character
 
@@ -399,7 +420,7 @@ class CmdSay(MuxCommand):
                                      exclude=caller)
 
 
-class CmdPose(MuxCommand):
+class CmdPose(COMMAND_DEFAULT_CLASS):
     """
     strike a pose
 
@@ -442,7 +463,7 @@ class CmdPose(MuxCommand):
             self.caller.location.msg_contents(msg)
 
 
-class CmdAccess(MuxCommand):
+class CmdAccess(COMMAND_DEFAULT_CLASS):
     """
     show your current game access
 

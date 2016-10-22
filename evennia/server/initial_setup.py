@@ -5,13 +5,14 @@ other things.
 
 Everything starts at handle_setup()
 """
+from __future__ import print_function
 
 import django
 from django.conf import settings
 from django.utils.translation import ugettext as _
 from evennia.players.models import PlayerDB
 from evennia.server.models import ServerConfig
-from evennia.utils import create
+from evennia.utils import create, logger
 
 
 ERROR_NO_SUPERUSER = \
@@ -43,14 +44,6 @@ WARNING_POSTGRESQL_FIX = \
     """
 
 
-def create_config_values():
-    """
-    Creates the initial config values.
-
-    """
-    ServerConfig.objects.conf("site_name", settings.SERVERNAME)
-    ServerConfig.objects.conf("idle_timeout", settings.IDLE_TIMEOUT)
-
 def get_god_player():
     """
     Creates the god user and don't take no for an answer.
@@ -69,7 +62,7 @@ def create_objects():
 
     """
 
-    print " Creating objects (Player #1 and Limbo room) ..."
+    logger.log_info("Creating objects (Player #1 and Limbo room) ...")
 
     # Set the initial User's account object's username on the #1 object.
     # This object is pure django and only holds name, email and password.
@@ -105,7 +98,11 @@ def create_objects():
 
     god_player.attributes.add("_first_login", True)
     god_player.attributes.add("_last_puppet", god_character)
-    god_player.db._playable_characters.append(god_character)
+
+    try:
+        god_player.db._playable_characters.append(god_character)
+    except AttributeError:
+        god_player.db_playable_characters = [god_character]
 
     room_typeclass = settings.BASE_ROOM_TYPECLASS
     limbo_obj = create.create_object(room_typeclass, _('Limbo'), nohome=True)
@@ -127,7 +124,7 @@ def create_channels():
     Creates some sensible default channels.
 
     """
-    print " Creating default channels ..."
+    logger.log_info("Creating default channels ...")
 
     goduser = get_god_player()
     for channeldict in settings.DEFAULT_CHANNELS:
@@ -150,7 +147,7 @@ def at_initial_setup():
         mod = __import__(modname, fromlist=[None])
     except (ImportError, ValueError):
         return
-    print " Running at_initial_setup() hook."
+    logger.log_info(" Running at_initial_setup() hook.")
     if mod.__dict__.get("at_initial_setup", None):
         mod.at_initial_setup()
 
@@ -164,7 +161,7 @@ def reset_server():
 
     """
     from evennia.server.sessionhandler import SESSIONS
-    print " Initial setup complete. Restarting Server once."
+    logger.log_info(" Initial setup complete. Restarting Server once.")
     SESSIONS.server.shutdown(mode='reset')
 
 
@@ -188,29 +185,25 @@ def handle_setup(last_step):
     last_step = last_step or 0
 
     # setting up the list of functions to run
-    setup_queue = [create_config_values,
-                   create_objects,
+    setup_queue = [create_objects,
                    create_channels,
                    at_initial_setup,
                    reset_server]
-
-    #print " Initial setup: %s steps." % (len(setup_queue))
 
     # step through queue, from last completed function
     for num, setup_func in enumerate(setup_queue[last_step:]):
         # run the setup function. Note that if there is a
         # traceback we let it stop the system so the config
         # step is not saved.
-        #print "%s..." % num
 
         try:
             setup_func()
         except Exception:
-            if last_step + num == 2:
+            if last_step + num == 1:
                 from evennia.objects.models import ObjectDB
                 for obj in ObjectDB.objects.all():
                     obj.delete()
-            elif last_step + num == 3:
+            elif last_step + num == 2:
                 from evennia.comms.models import ChannelDB
                 ChannelDB.objects.all().delete()
             raise

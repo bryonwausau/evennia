@@ -1,9 +1,9 @@
 from django.conf import settings
 from django.test import TestCase
 from mock import Mock
-from evennia.objects import DefaultObject, DefaultCharacter, DefaultRoom, DefaultExit
-from evennia.players import DefaultPlayer
-from evennia.scripts import DefaultScript
+from evennia.objects.objects import DefaultObject, DefaultCharacter, DefaultRoom, DefaultExit
+from evennia.players.players import DefaultPlayer
+from evennia.scripts.scripts import DefaultScript
 from evennia.server.serversession import ServerSession
 from evennia.server.sessionhandler import SESSIONS
 from evennia.utils import create
@@ -50,13 +50,17 @@ class EvenniaTest(TestCase):
 
         # set up a fake session
 
-        session = ServerSession()
-        session.init_session("telnet", ("localhost", "testmode"), SESSIONS)
-        session.sessid = 1
-        SESSIONS.portal_connect(session.get_sync_data())
-        SESSIONS.login(SESSIONS.session_from_sessid(1), self.player, testmode=True)
+        dummysession = ServerSession()
+        dummysession.init_session("telnet", ("localhost", "testmode"), SESSIONS)
+        dummysession.sessid = 1
+        SESSIONS.portal_connect(dummysession.get_sync_data()) # note that this creates a new Session!
+        session = SESSIONS.session_from_sessid(1) # the real session
+        SESSIONS.login(session, self.player, testmode=True)
         self.session = session
 
     def tearDown(self):
         flush_cache()
-        del SESSIONS.sessions[self.session.sessid]
+        del SESSIONS[self.session.sessid]
+        self.player.delete()
+        self.player2.delete()
+        super(EvenniaTest, self).tearDown()

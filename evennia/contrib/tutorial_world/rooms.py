@@ -8,13 +8,14 @@ commands needed to control them. Those commands could also have been
 in a separate module (e.g. if they could have been re-used elsewhere.)
 
 """
+from __future__ import print_function
 
 import random
 from evennia import TICKER_HANDLER
 from evennia import CmdSet, Command, DefaultRoom
 from evennia import utils, create_object, search_object
 from evennia import syscmdkeys, default_cmds
-from evennia.contrib.tutorial_world.objects import LightSource, TutorialObject
+from evennia.contrib.tutorial_world.objects import LightSource
 
 # the system error-handling module is defined in the settings. We load the
 # given setting here using utils.object_from_module. This way we can use
@@ -153,7 +154,10 @@ class CmdTutorialLook(default_cmds.CmdLook):
             # ourself. This also means the search function will always
             # return a list (with 0, 1 or more elements) rather than
             # result/None.
-            looking_at_obj = caller.search(args, use_nicks=True, quiet=True)
+            looking_at_obj = caller.search(args,
+                                           # note: excludes room/room aliases
+                                           candidates=caller.location.contents + caller.contents,
+                                           use_nicks=True, quiet=True)
             if len(looking_at_obj) != 1:
                 # no target found or more than one target found (multimatch)
                 # look for a detail that may match
@@ -164,7 +168,7 @@ class CmdTutorialLook(default_cmds.CmdLook):
                 else:
                     # no detail found, delegate our result to the normal
                     # error message handler.
-                    _SEARCH_AT_RESULT(caller, args, looking_at_obj)
+                    _SEARCH_AT_RESULT(None, caller, args, looking_at_obj)
                     return
             else:
                 # we found a match, extract it from the list and carry on
@@ -309,7 +313,7 @@ class WeatherRoom(TutorialRoom):
         # "update_weather" on this object. The interval is randomized
         # so as to not have all weather rooms update at the same time.
         interval = random.randint(50, 70)
-        TICKER_HANDLER.add(self, interval, idstring="tutorial", hook_key="update_weather")
+        TICKER_HANDLER.add(interval=interval, callback=self.update_weather, idstring="tutorial")
         # this is parsed by the 'tutorial' command on TutorialRooms.
         self.db.tutorial_info = \
             "This room has a Script running that has it echo a weather-related message at irregular intervals."
@@ -355,7 +359,7 @@ class IntroRoom(TutorialRoom):
         Called when the room is first created.
         """
         super(IntroRoom, self).at_object_creation()
-        self.db_tutorial_info = "The first room of the tutorial. " \
+        self.db.tutorial_info = "The first room of the tutorial. " \
                                 "This assigns the health Attribute to "\
                                 "the player."
 
@@ -626,6 +630,12 @@ class BridgeRoom(WeatherRoom):
         self.db.fall_exit = "cliffledge"
         # add the cmdset on the room.
         self.cmdset.add_default(BridgeCmdSet)
+        # since the default Character's at_look() will access the room's
+        # return_description (this skips the cmdset) when
+        # first entering it, we need to explicitly turn off the room
+        # as a normal view target - once inside, our own look will
+        # handle all return messages.
+        self.locks.add("view:false()")
 
     def update_weather(self, *args, **kwargs):
         """
@@ -658,6 +668,7 @@ class BridgeRoom(WeatherRoom):
             else:
                 # if not from the east, then from the west!
                 character.db.tutorial_bridge_position = 0
+            character.execute_cmd("look")
 
     def at_object_leave(self, character, target_location):
         """
@@ -830,7 +841,7 @@ class DarkRoom(TutorialRoom):
         if there is a light-giving object in the room overall (like if
         a splinter was dropped in the room)
         """
-        return obj.is_superuser or obj.db.is_giving_light or obj.is_superuser or any(o for o in obj.contents if o.db.is_giving_light)
+        return obj.is_superuser or obj.db.is_giving_light or any(o for o in obj.contents if o.db.is_giving_light)
 
     def _heal(self, character):
         """
@@ -839,14 +850,18 @@ class DarkRoom(TutorialRoom):
         health = character.db.health_max or 20
         character.db.health = health
 
-    def check_light_state(self):
+    def check_light_state(self, exclude=None):
         """
         This method checks if there are any light sources in the room.
         If there isn't it makes sure to add the dark cmdset to all
         characters in the room. It is called whenever characters enter
         the room and also by the Light sources when they turn on.
+
+        Args:
+            exclude (Object): An object to not include in the light check.
         """
-        if any(self._carries_light(obj) for obj in self.contents):
+        if any(self._carries_light(obj) for obj in self.contents if obj != exclude):
+            self.locks.add("view:all()")
             self.cmdset.remove(DarkCmdSet)
             self.db.is_lit = True
             for char in (obj for obj in self.contents if obj.has_player):
@@ -855,6 +870,7 @@ class DarkRoom(TutorialRoom):
         else:
             # noone is carrying light - darken the room
             self.db.is_lit = False
+            self.locks.add("view:false()")
             self.cmdset.add(DarkCmdSet, permanent=True)
             for char in (obj for obj in self.contents if obj.has_player):
                 if char.is_superuser:
@@ -871,7 +887,7 @@ class DarkRoom(TutorialRoom):
             # a puppeted object, that is, a Character
             self._heal(obj)
             # in case the new guy carries light with them
-        self.check_light_state()
+            self.check_light_state()
 
     def at_object_leave(self, obj, target_location):
         """
@@ -879,7 +895,10 @@ class DarkRoom(TutorialRoom):
         DarkCmdSet if necessary.  This also works if they are
         teleported away.
         """
-        self.check_light_state()
+        # since this hook is called while the object is still in the room,
+        # we exclude it from the light check, to ignore any light sources
+        # it may be carrying.
+        self.check_light_state(exclude=obj)
 
 
 #------------------------------------------------------------
@@ -939,7 +958,7 @@ class TeleportRoom(TutorialRoom):
         results = search_object(teleport_to)
         if not results or len(results) > 1:
             # we cannot move anywhere since no valid target was found.
-            print "no valid teleport target for %s was found." % teleport_to
+            character.msg("no valid teleport target for %s was found." % teleport_to)
             return
         if character.is_superuser:
             # superusers don't get teleported
@@ -952,6 +971,10 @@ class TeleportRoom(TutorialRoom):
             character.msg(self.db.failure_teleport_msg)
         # teleport quietly to the new place
         character.move_to(results[0], quiet=True, move_hooks=False)
+        # we have to call this manually since we turn off move_hooks
+        # - this is necessary to make the target dark room aware of an
+        # already carried light.
+        results[0].at_object_receive(character, self)
 
 
 #------------------------------------------------------------
@@ -976,7 +999,7 @@ class OutroRoom(TutorialRoom):
         Called when the room is first created.
         """
         super(OutroRoom, self).at_object_creation()
-        self.db_tutorial_info = "The last room of the tutorial. " \
+        self.db.tutorial_info = "The last room of the tutorial. " \
                                 "This cleans up all temporary Attributes " \
                                 "the tutorial may have assigned to the "\
                                 "character."
@@ -986,13 +1009,13 @@ class OutroRoom(TutorialRoom):
         Do cleanup.
         """
         if character.has_player:
-            if self.db.wracklist:
-                for wrackid in self.db.wracklist:
-                    character.del_attribute(wrackid)
             del character.db.health_max
             del character.db.health
             del character.db.last_climbed
             del character.db.puzzle_clue
             del character.db.combat_parry_mode
             del character.db.tutorial_bridge_position
+            for obj in character.contents:
+                if obj.typeclass_path.startswith("evennia.contrib.tutorial_world"):
+                    obj.delete()
             character.tags.clear(category="tutorial_world")

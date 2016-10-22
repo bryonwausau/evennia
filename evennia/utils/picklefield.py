@@ -28,6 +28,7 @@ Pickle field implementation for Django.
 Modified for Evennia by Griatch.
 
 """
+from builtins import object
 from ast import literal_eval
 
 from copy import deepcopy
@@ -40,10 +41,11 @@ from django.db import models
 
 # django 1.5 introduces force_text instead of force_unicode
 from django.forms import CharField, Textarea
-from django.forms.util import flatatt
+from django.forms.utils import flatatt
 from django.utils.html import format_html
 
 from evennia.utils.dbserialize import from_pickle, to_pickle
+from future.utils import with_metaclass
 
 try:
     from django.utils.encoding import force_text
@@ -115,19 +117,6 @@ def dbsafe_decode(value, compress_object=False):
     return loads(value)
 
 
-def _get_subfield_superclass():
-    # hardcore trick to support django < 1.3 - there was something wrong with
-    # inheritance and SubfieldBase before django 1.3
-    # see https://github.com/django/django/commit/222c73261650201f5ce99e8dd4b1ce0d30a69eb4
-    if django.VERSION < (1,3):
-        return models.Field
-    # mimic six.with_metaclass
-    meta = models.SubfieldBase
-    base = models.Field
-    return meta("NewBase", (base,), {})
-    #return six.with_metaclass(models.SubfieldBase, models.Field)
-
-
 class PickledWidget(Textarea):
     def render(self, name, value, attrs=None):
         value = repr(value)
@@ -167,7 +156,7 @@ class PickledFormField(CharField):
             raise ValidationError(self.error_messages['invalid'])
 
 
-class PickledObjectField(_get_subfield_superclass()):
+class PickledObjectField(models.Field):
     """
     A field that will accept *any* python object and store it in the
     database. PickledObjectField will optionally compress its values if
@@ -177,7 +166,6 @@ class PickledObjectField(_get_subfield_superclass()):
     can still do lookups using None). This way, it is still possible to
     use the ``isnull`` lookup type correctly.
     """
-    __metaclass__ = models.SubfieldBase  # for django < 1.3
 
     def __init__(self, *args, **kwargs):
         self.compress = kwargs.pop('compress', False)
@@ -203,7 +191,8 @@ class PickledObjectField(_get_subfield_superclass()):
         # If the field doesn't have a default, then we punt to models.Field.
         return super(PickledObjectField, self).get_default()
 
-    def to_python(self, value):
+    #def to_python(self, value):
+    def from_db_value(self, value, *args):
         """
         B64decode and unpickle the object, optionally decompressing it.
 

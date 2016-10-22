@@ -29,6 +29,7 @@ at_cmdset_creation():
 After a reload the dice (or roll) command will be available in-game.
 
 """
+from builtins import range
 
 import re
 from random import randint
@@ -161,7 +162,7 @@ class CmdDice(default_cmds.MuxCommand):
             return
         argstring = "".join(str(arg) for arg in self.args)
 
-        parts = RE_PARTS.split(self.args)
+        parts = [part for part in RE_PARTS.split(self.args) if part]
         lparts = len(parts)
 
         ndice = 0
@@ -170,7 +171,7 @@ class CmdDice(default_cmds.MuxCommand):
         conditional = None
 
         if lparts < 3 or parts[1] != 'd':
-            self.caller.msg("You must specify the die roll(s) as <nr>d<sides>. So 2d6 means rolling a 6-sided die 2 times.")
+            self.caller.msg("You must specify the die roll(s) as <nr>d<sides>. For example, 2d6 means rolling a 6-sided die 2 times.")
             return
 
         # Limit the number of dice and sides a character can roll to prevent server slow down and crashes

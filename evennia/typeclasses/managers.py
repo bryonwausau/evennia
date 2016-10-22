@@ -41,7 +41,11 @@ def returns_typeclass(method):
     def func(self, *args, **kwargs):
         self.__doc__ = method.__doc__
         query = method(self, *args, **kwargs)
-        return query
+        if hasattr(query, "__iter__"):
+            result = list(query)
+            return result[0] if result else None
+        else:
+            return query
     return update_wrapper(func, method)
 
 # Managers
@@ -327,6 +331,8 @@ class TypedObjectManager(idmapper.manager.SharedMemoryManager):
 
         tag = self.get_tag(key=key, category=category, tagtype=tagtype, global_search=True)
         if tag and data is not None:
+            # get tag from list returned by get_tag
+            tag = tag[0]
             # overload data on tag
             tag.db_data = data
             tag.save()
@@ -503,11 +509,14 @@ class TypeclassManager(TypedObjectManager):
 
     """
 
-    def get(self, **kwargs):
+    def get(self, *args, **kwargs):
         """
         Overload the standard get. This will limit itself to only
         return the current typeclass.
 
+        Args:
+            args (any): These are passed on as arguments to the default
+                django get method.
         Kwargs:
             kwargs (any): These are passed on as normal arguments
                 to the default django get method
@@ -522,37 +531,78 @@ class TypeclassManager(TypedObjectManager):
         kwargs.update({"db_typeclass_path":self.model.path})
         return super(TypedObjectManager, self).get(**kwargs)
 
-    def filter(self, **kwargs):
+    def filter(self, *args, **kwargs):
         """
         Overload of the standard filter function. This filter will
         limit itself to only the current typeclass.
 
+        Args:
+            args (any): These are passed on as arguments to the default
+                django filter method.
         Kwargs:
             kwargs (any): These are passed on as normal arguments
                 to the default django filter method.
         Returns:
-            objects (list): The objects found.
+            objects (queryset): The objects found.
 
         """
         kwargs.update({"db_typeclass_path":self.model.path})
-        return super(TypedObjectManager, self).filter(**kwargs)
+        return super(TypedObjectManager, self).filter(*args, **kwargs)
 
-    def all(self, **kwargs):
+    def all(self):
         """
         Overload method to return all matches, filtering for typeclass.
 
-        Kwargs:
-            kwargs (any): These are passed on as normal arguments
-                to the default django all method (usually none are given).
         Returns:
-            objects (list): The objects found.
+            objects (queryset): The objects found.
 
         """
-        return super(TypedObjectManager, self).all(**kwargs).filter(db_typeclass_path=self.model.path)
+        return super(TypedObjectManager, self).all().filter(db_typeclass_path=self.model.path)
+
+    def first(self):
+        """
+        Overload method to return first match, filtering for typeclass.
+
+        Returns:
+            object (object): The object found.
+
+        Raises:
+            ObjectNotFound: The exact name of this exception depends
+                on the model base used.
+
+        """
+        return super(TypedObjectManager, self).filter(db_typeclass_path=self.model.path).first()
+
+    def last(self):
+        """
+        Overload method to return last match, filtering for typeclass.
+
+        Returns:
+            object (object): The object found.
+
+        Raises:
+            ObjectNotFound: The exact name of this exception depends
+                on the model base used.
+
+        """
+        return super(TypedObjectManager, self).filter(db_typeclass_path=self.model.path).last()
+
+    def count(self):
+        """
+        Overload method to return number of matches, filtering for typeclass.
+
+        Returns:
+            integer : Number of objects found.
+
+        """
+        return super(TypedObjectManager, self).filter(db_typeclass_path=self.model.path).count()
 
     def _get_subclasses(self, cls):
         """
         Recursively get all subclasses to a class.
+
+        Args:
+            cls (classoject): A class to get subclasses from.
         """
         all_subclasses = cls.__subclasses__()
         for subclass in all_subclasses:
@@ -580,11 +630,14 @@ class TypeclassManager(TypedObjectManager):
         kwargs.update({"db_typeclass_path__in":paths})
         return super(TypedObjectManager, self).get(**kwargs)
 
-    def filter_family(self, **kwargs):
+    def filter_family(self, *args, **kwargs):
         """
         Variation of filter that allows results both from typeclass
         and from subclasses of typeclass
 
+        Args:
+            args (any): These are passed on as arguments to the default
+                django filter method.
         Kwargs:
             kwargs (any): These are passed on as normal arguments
                 to the default django filter method.
@@ -596,22 +649,19 @@ class TypeclassManager(TypedObjectManager):
         paths = [self.model.path] + ["%s.%s" % (cls.__module__, cls.__name__)
                          for cls in self._get_subclasses(self.model)]
         kwargs.update({"db_typeclass_path__in":paths})
-        return super(TypedObjectManager, self).filter(**kwargs)
+        return super(TypedObjectManager, self).filter(*args, **kwargs)
 
-    def all_family(self, **kwargs):
+    def all_family(self):
         """
         Return all matches, allowing matches from all subclasses of
         the typeclass.
 
-        Kwargs:
-            kwargs (any): These are passed on as normal arguments
-                to the default django all method (usually none are given).
         Returns:
             objects (list): The objects found.
 
         """
         paths = [self.model.path] + ["%s.%s" % (cls.__module__, cls.__name__)
                          for cls in self._get_subclasses(self.model)]
-        return super(TypedObjectManager, self).all(**kwargs).filter(db_typeclass_path__in=paths)
+        return super(TypedObjectManager, self).all().filter(db_typeclass_path__in=paths)
 
 

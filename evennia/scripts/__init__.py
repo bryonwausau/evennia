@@ -5,4 +5,3 @@ or globally. They may also have a timer-component to execute various
 timed effects.
 
 """
-from scripts import DefaultScript

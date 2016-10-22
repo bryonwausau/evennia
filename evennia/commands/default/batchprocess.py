@@ -17,12 +17,19 @@ the Evennia API.  It is also a severe security risk and should
 therefore always be limited to superusers only.
 
 """
-from traceback import format_exc
+import re
+from builtins import range
+
 from django.conf import settings
 from evennia.utils.batchprocessors import BATCHCMD, BATCHCODE
 from evennia.commands.cmdset import CmdSet
-from evennia.commands.default.muxcommand import MuxCommand
-from evennia.utils import utils
+from evennia.utils import logger, utils
+
+
+_RE_COMMENT = re.compile(r"^#.*?$", re.MULTILINE + re.DOTALL)
+_RE_CODE_START = re.compile(r"^# batchcode code:", re.MULTILINE)
+_COMMAND_DEFAULT_CLASS = utils.class_from_module(settings.COMMAND_DEFAULT_CLASS)
+#from evennia.commands.default.muxcommand import _COMMAND_DEFAULT_CLASS
 
 # limit symbols for API inclusion
 __all__ = ("CmdBatchCommands", "CmdBatchCode")
@@ -85,7 +92,11 @@ def format_header(caller, entry):
     Formats a header
     """
     width = _HEADER_WIDTH - 10
-    entry = entry.strip()
+    # strip all comments for the header
+    if caller.ndb.batch_batchmode != "batch_commands":
+        # only do cleanup for  batchcode
+        entry = _RE_CODE_START.split(entry, 1)[1]
+        entry = _RE_COMMENT.sub("", entry).strip()
     header = utils.crop(entry, width=width)
     ptr = caller.ndb.batch_stackptr + 1
     stacklen = len(caller.ndb.batch_stack)
@@ -118,7 +129,7 @@ def batch_cmd_exec(caller):
     try:
         caller.execute_cmd(command)
     except Exception:
-        caller.msg(format_code(format_exc()))
+        logger.log_trace()
         return False
     return True
 
@@ -194,9 +205,15 @@ def purge_processor(caller):
         del caller.ndb.batch_batchmode
     except:
         pass
-    # clear everything but the default cmdset.
-    caller.cmdset.delete(BatchSafeCmdSet)
-    caller.cmdset.clear()
+    # clear everything back to the state before the batch call
+    if caller.ndb.batch_cmdset_backup:
+        caller.cmdset.cmdset_stack = caller.ndb.batch_cmdset_backup
+        caller.cmdset.update()
+        del caller.ndb.batch_cmdset_backup
+    else:
+        # something went wrong. Purge cmdset except default
+        caller.cmdset.clear()
+
     caller.scripts.validate()  # this will purge interactive mode
 
 #------------------------------------------------------------
@@ -204,7 +221,7 @@ def purge_processor(caller):
 #------------------------------------------------------------
 
 
-class CmdBatchCommands(MuxCommand):
+class CmdBatchCommands(_COMMAND_DEFAULT_CLASS):
     """
     build from batch-command file
 
@@ -239,12 +256,12 @@ class CmdBatchCommands(MuxCommand):
 
         try:
             commands = BATCHCMD.parse_file(python_path)
-        except UnicodeDecodeError, err:
+        except UnicodeDecodeError as err:
             caller.msg(_UTF8_ERROR % (python_path, err))
             return
         except IOError as err:
-            string = "'%s' not found.\nYou have to supply the python path "
-            string += "of the file relative to \none of your batch-file directories (%s)."
+            string = "'%s' not found.\nYou have to supply the python path\n" \
+                     "using one of the defined batch-file directories\n (%s)."
             caller.msg(string % (python_path, ", ".join(settings.BASE_BATCHPROCESS_PATHS)))
             return
         if not commands:
@@ -258,6 +275,8 @@ class CmdBatchCommands(MuxCommand):
         caller.ndb.batch_stackptr = 0
         caller.ndb.batch_pythonpath = python_path
         caller.ndb.batch_batchmode = "batch_commands"
+        # we use list() here to create a new copy of the cmdset stack
+        caller.ndb.batch_cmdset_backup = list(caller.cmdset.cmdset_stack)
         caller.cmdset.add(BatchSafeCmdSet)
 
         if 'inter' in switches or 'interactive' in switches:
@@ -307,7 +326,7 @@ class CmdBatchCommands(MuxCommand):
                 purge_processor(caller)
 
 
-class CmdBatchCode(MuxCommand):
+class CmdBatchCode(_COMMAND_DEFAULT_CLASS):
     """
     build from batch-code file
 
@@ -345,13 +364,13 @@ class CmdBatchCode(MuxCommand):
 
         #parse indata file
         try:
-            codes = BATCHCODE.parse_file(python_path, debug=debug)
-        except UnicodeDecodeError, err:
+            codes = BATCHCODE.parse_file(python_path)
+        except UnicodeDecodeError as err:
             caller.msg(_UTF8_ERROR % (python_path, err))
             return
         except IOError:
-            string = "'%s' not found.\nYou have to supply the python path "
-            string += "of the file relative to \nyour batch-file directories (%s)."
+            string = "'%s' not found.\nYou have to supply the python path\n" \
+                     "from one of the defined batch-file directories\n (%s)."
             caller.msg(string % (python_path, ", ".join(settings.BASE_BATCHPROCESS_PATHS)))
             return
         if not codes:
@@ -366,6 +385,8 @@ class CmdBatchCode(MuxCommand):
         caller.ndb.batch_pythonpath = python_path
         caller.ndb.batch_batchmode = "batch_code"
         caller.ndb.batch_debug = debug
+        # we use list() here to create a new copy of cmdset_stack
+        caller.ndb.batch_cmdset_backup = list(caller.cmdset.cmdset_stack)
         caller.cmdset.add(BatchSafeCmdSet)
 
         if 'inter' in switches or 'interactive'in switches:
@@ -418,7 +439,7 @@ class CmdBatchCode(MuxCommand):
 # (these are the same for both processors)
 #------------------------------------------------------------
 
-class CmdStateAbort(MuxCommand):
+class CmdStateAbort(_COMMAND_DEFAULT_CLASS):
     """
     @abort
 
@@ -436,7 +457,7 @@ class CmdStateAbort(MuxCommand):
         self.caller.msg("Exited processor and reset out active cmdset back to the default one.")
 
 
-class CmdStateLL(MuxCommand):
+class CmdStateLL(_COMMAND_DEFAULT_CLASS):
     """
     ll
 
@@ -450,7 +471,7 @@ class CmdStateLL(MuxCommand):
     def func(self):
         show_curr(self.caller, showall=True)
 
-class CmdStatePP(MuxCommand):
+class CmdStatePP(_COMMAND_DEFAULT_CLASS):
     """
     pp
 
@@ -471,7 +492,7 @@ class CmdStatePP(MuxCommand):
             batch_cmd_exec(caller)
 
 
-class CmdStateRR(MuxCommand):
+class CmdStateRR(_COMMAND_DEFAULT_CLASS):
     """
     rr
 
@@ -493,7 +514,7 @@ class CmdStateRR(MuxCommand):
         show_curr(caller)
 
 
-class CmdStateRRR(MuxCommand):
+class CmdStateRRR(_COMMAND_DEFAULT_CLASS):
     """
     rrr
 
@@ -515,7 +536,7 @@ class CmdStateRRR(MuxCommand):
         show_curr(caller)
 
 
-class CmdStateNN(MuxCommand):
+class CmdStateNN(_COMMAND_DEFAULT_CLASS):
     """
     nn
 
@@ -536,7 +557,7 @@ class CmdStateNN(MuxCommand):
         show_curr(caller)
 
 
-class CmdStateNL(MuxCommand):
+class CmdStateNL(_COMMAND_DEFAULT_CLASS):
     """
     nl
 
@@ -558,7 +579,7 @@ class CmdStateNL(MuxCommand):
         show_curr(caller, showall=True)
 
 
-class CmdStateBB(MuxCommand):
+class CmdStateBB(_COMMAND_DEFAULT_CLASS):
     """
     bb
 
@@ -580,7 +601,7 @@ class CmdStateBB(MuxCommand):
         show_curr(caller)
 
 
-class CmdStateBL(MuxCommand):
+class CmdStateBL(_COMMAND_DEFAULT_CLASS):
     """
     bl
 
@@ -602,7 +623,7 @@ class CmdStateBL(MuxCommand):
         show_curr(caller, showall=True)
 
 
-class CmdStateSS(MuxCommand):
+class CmdStateSS(_COMMAND_DEFAULT_CLASS):
     """
     ss [steps]
 
@@ -631,7 +652,7 @@ class CmdStateSS(MuxCommand):
             show_curr(caller)
 
 
-class CmdStateSL(MuxCommand):
+class CmdStateSL(_COMMAND_DEFAULT_CLASS):
     """
     sl [steps]
 
@@ -660,7 +681,7 @@ class CmdStateSL(MuxCommand):
             show_curr(caller)
 
 
-class CmdStateCC(MuxCommand):
+class CmdStateCC(_COMMAND_DEFAULT_CLASS):
     """
     cc
 
@@ -685,14 +706,11 @@ class CmdStateCC(MuxCommand):
             step_pointer(caller, 1)
             show_curr(caller)
 
-        del caller.ndb.batch_stack
-        del caller.ndb.batch_stackptr
-        del caller.ndb.batch_pythonpath
-        del caller.ndb.batch_batchmode
+        purge_processor(self)
         caller.msg(format_code("Finished processing batch file."))
 
 
-class CmdStateJJ(MuxCommand):
+class CmdStateJJ(_COMMAND_DEFAULT_CLASS):
     """
     jj <command number>
 
@@ -716,7 +734,7 @@ class CmdStateJJ(MuxCommand):
         show_curr(caller)
 
 
-class CmdStateJL(MuxCommand):
+class CmdStateJL(_COMMAND_DEFAULT_CLASS):
     """
     jl <command number>
 
@@ -740,7 +758,7 @@ class CmdStateJL(MuxCommand):
         show_curr(caller, showall=True)
 
 
-class CmdStateQQ(MuxCommand):
+class CmdStateQQ(_COMMAND_DEFAULT_CLASS):
     """
     qq
 
@@ -755,7 +773,7 @@ class CmdStateQQ(MuxCommand):
         self.caller.msg("Aborted interactive batch mode.")
 
 
-class CmdStateHH(MuxCommand):
+class CmdStateHH(_COMMAND_DEFAULT_CLASS):
     "Help command"
 
     key = "hh"

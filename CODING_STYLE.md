@@ -21,9 +21,8 @@ on your sources.
    - Python modules (builtins and standard library)
    - Twisted modules
    - Django modules
-   - Evennia src/ modules
-   - Evennia game/ modules
-   - Evennia 'ev' API imports
+   - Evennia library modules (`evennia`)
+   - Evennia contrib modules (`evennia.contrib`)
  * All modules, classes, functions and modules should have doc
    strings formatted as described below
 
@@ -34,11 +33,6 @@ formatted with [Google style][googlestyle] -inspired indents, using
 [Markdown][githubmarkdown] formatting where needed. Evennia's `api2md`
 parser will use this to create pretty API documentation.
 
-> Note that far from all sources are currently formatted using the
-> consistent style listed here. This is something that is being
-> worked on and any help to convert existing docs are appreciated.
-> We also don't support all forms of the google style syntax, going
-> for a limited and more restricted set for consistency.
 
 ### Module docstrings
 
@@ -181,6 +175,12 @@ good idea, for a small number of arguments though, just using `Args:`
 and marking keywords as `optional` will shorten the docstring and make
 it easier to read.
 
+### Default Commands
+
+These represent a special case since Commands in Evennia are using their
+class docstrings to represent the in-game help entry for that command. 
+So for the default look of Command class docstrings see instead 
+[the default command documentation policy][command-docstrings].
 
 ## Ask Questions!
 
@@ -191,6 +191,7 @@ or in the chat.
 
 [pep8]: http://www.python.org/dev/peps/pep-0008
 [pep8tool]: https://pypi.python.org/pypi/pep8
-[googlestyle]: http://google-styleguide.googlecode.com/svn/trunk/pyguide.html?showone=Comments#Comments
+[googlestyle]: http://www.sphinx-doc.org/en/stable/ext/example_google.html
 [githubmarkdown]: https://help.github.com/articles/github-flavored-markdown/
 [markdown-hilight]: https://help.github.com/articles/github-flavored-markdown/#syntax-highlighting
+[command-docstrings]: https://github.com/evennia/evennia/wiki/Using%20MUX%20As%20a%20Standard#documentation-policy

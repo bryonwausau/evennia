@@ -6,28 +6,143 @@ connection actually happens (so it's the same for telnet, web, ssh etc).
 It is stored on the Server side (as opposed to protocol-specific sessions which
 are stored on the Portal side)
 """
+from builtins import object
 
 import re
+import weakref
+import importlib
 from time import time
 from django.utils import timezone
 from django.conf import settings
 from evennia.comms.models import ChannelDB
 from evennia.utils import logger
-from evennia.utils.inlinefunc import parse_inlinefunc
-from evennia.utils.utils import make_iter
-from evennia.commands.cmdhandler import cmdhandler
+from evennia.utils.utils import make_iter, lazy_property
 from evennia.commands.cmdsethandler import CmdSetHandler
 from evennia.server.session import Session
 
-_IDLE_COMMAND = settings.IDLE_COMMAND
+ClientSessionStore = importlib.import_module(settings.SESSION_ENGINE).SessionStore
+
 _GA = object.__getattribute__
+_SA = object.__setattr__
 _ObjectDB = None
 _ANSI = None
-_INLINEFUNC_ENABLED = settings.INLINEFUNC_ENABLED
-_RE_SCREENREADER_REGEX = re.compile(r"%s" % settings.SCREENREADER_REGEX_STRIP, re.DOTALL + re.MULTILINE)
 
 # i18n
 from django.utils.translation import ugettext as _
+
+# Handlers for Session.db/ndb operation
+
+class NDbHolder(object):
+    "Holder for allowing property access of attributes"
+    def __init__(self, obj, name, manager_name='attributes'):
+        _SA(self, name, _GA(obj, manager_name))
+        _SA(self, 'name', name)
+
+    def __getattribute__(self, attrname):
+        if attrname == 'all':
+            # we allow to overload our default .all
+            attr = _GA(self, _GA(self, 'name')).get("all")
+            return attr if attr else _GA(self, "all")
+        return _GA(self, _GA(self, 'name')).get(attrname)
+
+    def __setattr__(self, attrname, value):
+        _GA(self, _GA(self, 'name')).add(attrname, value)
+
+    def __delattr__(self, attrname):
+        _GA(self, _GA(self, 'name')).remove(attrname)
+
+    def get_all(self):
+        return _GA(self, _GA(self, 'name')).all()
+    all = property(get_all)
+
+
+class NAttributeHandler(object):
+    """
+    NAttributeHandler version without recache protection.
+    This stand-alone handler manages non-database saving.
+    It is similar to `AttributeHandler` and is used
+    by the `.ndb` handler in the same way as `.db` does
+    for the `AttributeHandler`.
+    """
+    def __init__(self, obj):
+        """
+        Initialized on the object
+        """
+        self._store = {}
+        self.obj = weakref.proxy(obj)
+
+    def has(self, key):
+        """
+        Check if object has this attribute or not.
+
+        Args:
+            key (str): The Nattribute key to check.
+
+        Returns:
+            has_nattribute (bool): If Nattribute is set or not.
+
+        """
+        return key in self._store
+
+    def get(self, key, default=None):
+        """
+        Get the named key value.
+
+        Args:
+            key (str): The Nattribute key to get.
+
+        Returns:
+            the value of the Nattribute.
+
+        """
+        return self._store.get(key, default)
+
+    def add(self, key, value):
+        """
+        Add new key and value.
+
+        Args:
+            key (str): The name of Nattribute to add.
+            value (any): The value to store.
+
+        """
+        self._store[key] = value
+
+    def remove(self, key):
+        """
+        Remove Nattribute from storage.
+
+        Args:
+            key (str): The name of the Nattribute to remove.
+
+        """
+        if key in self._store:
+            del self._store[key]
+
+    def clear(self):
+        """
+        Remove all NAttributes from handler.
+
+        """
+        self._store = {}
+
+    def all(self, return_tuples=False):
+        """
+        List the contents of the handler.
+
+        Args:
+            return_tuples (bool, optional): Defines if the Nattributes
+                are returns as a list of keys or as a list of `(key, value)`.
+
+        Returns:
+            nattributes (list): A list of keys `[key, key, ...]` or a
+                list of tuples `[(key, value), ...]` depending on the
+                setting of `return_tuples`.
+
+        """
+        if return_tuples:
+            return [(key, value) for (key, value) in self._store.items() if not key.startswith("_")]
+        return [key for key in self._store if not key.startswith("_")]
 
 
 #------------------------------------------------------------
@@ -84,11 +199,11 @@ class ServerSession(Session):
             # done in the default @ic command but without any
             # hooks, echoes or access checks.
             obj = _ObjectDB.objects.get(id=self.puid)
-            obj.sessid.add(self.sessid)
+            obj.sessions.add(self)
             obj.player = self.player
             self.puid = obj.id
             self.puppet = obj
-            obj.scripts.validate()
+            #obj.scripts.validate()
             obj.locks.cache_lock_bypass(obj)
 
     def at_login(self, player):
@@ -108,6 +223,15 @@ class ServerSession(Session):
         self.puppet = None
         self.cmdset_storage = settings.CMDSET_SESSION
 
+        if self.csessid:
+            # An existing client sessid is registered, thus a matching
+            # Client Session must also exist. Update it so the website
+            # can also see we are logged in.
+            csession = ClientSessionStore(session_key=self.csessid)
+            if not csession.get("logged_in"):
+                csession["logged_in"] = player.id
+                csession.save()
+
         # Update account's last login time.
         self.player.last_login = timezone.now()
         self.player.save()
@@ -121,10 +245,9 @@ class ServerSession(Session):
 
         """
         if self.logged_in:
-            sessid = self.sessid
             player = self.player
             if self.puppet:
-                player.unpuppet_object(sessid)
+                player.unpuppet_object(self)
             uaccount = player
             uaccount.last_login = timezone.now()
             uaccount.save()
@@ -188,7 +311,7 @@ class ServerSession(Session):
                 cchan.msg("[%s]: %s" % (cchan.key, message))
             except Exception:
                 pass
-        logger.log_infomsg(message)
+        logger.log_info(message)
 
     def get_client_size(self):
         """
@@ -208,72 +331,91 @@ class ServerSession(Session):
         idle timers and command counters.
 
         """
+        # Idle time used for timeout calcs.
+        self.cmd_last = time()
+
         # Store the timestamp of the user's last command.
         if not idle:
             # Increment the user's command counter.
             self.cmd_total += 1
             # Player-visible idle time, not used in idle timeout calcs.
-            self.cmd_last_visible = time()
+            self.cmd_last_visible = self.cmd_last
 
-    def data_in(self, text=None, **kwargs):
+    def update_flags(self, **kwargs):
         """
-        Send data User->Evennia. This will in effect execute a command
-        string on the server.
-
-        Note that oob data is already sent separately to the
-        oobhandler at this point.
+        Update the protocol_flags and sync them with Portal.
 
         Kwargs:
-            text (str): A text to relay
-            kwargs (any): Other parameters from the protocol.
+            key, value - A key:value pair to set in the
+                protocol_flags dictionary.
+
+        Notes:
+            Since protocols can vary, no checking is done
+            as to the existene of the flag or not. The input
+            data should have been validated before this call.
 
         """
-        #explicitly check for None since text can be an empty string, which is
-        #also valid
+        if kwargs:
+            self.protocol_flags.update(kwargs)
+            self.sessionhandler.session_portal_sync(self)
+
+
+    def data_out(self, **kwargs):
+        """
+        Sending data from Evennia->Client
+
+        Kwargs:
+            text (str or tuple)
+            any (str or tuple): Send-commands identified
+                by their keys. Or "options", carrying options
+                for the protocol(s).
+
+        """
+        self.sessionhandler.data_out(self, **kwargs)
+
+    def msg(self, text=None, **kwargs):
+        """
+        Wrapper to mimic msg() functionality of Objects and Players
+        (server sessions don't use data_in since incoming data is
+        handled by inputfuncs).
+
+        Args:
+            text (str): String input.
+
+        Kwargs:
+            any (str or tuple): Send-commands identified
+                by their keys. Or "options", carrying options
+                for the protocol(s).
+
+        """
+        # this can happen if this is triggered e.g. a command.msg
+        # that auto-adds the session, we'd get a kwarg collision.
+        kwargs.pop("session", None)
         if text is not None:
-            # this is treated as a command input
-            #text = to_unicode(escape_control_sequences(text), encoding=self.encoding)
-            # handle the 'idle' command
-            if text.strip() == _IDLE_COMMAND:
-                self.update_session_counters(idle=True)
-                return
-            if self.player:
-                # nick replacement
-                puppet = self.player.get_puppet(self.sessid)
-                if puppet:
-                    text = puppet.nicks.nickreplace(text,
-                                  categories=("inputline", "channel"), include_player=True)
-                else:
-                    text = self.player.nicks.nickreplace(text,
-                                categories=("inputline", "channels"), include_player=False)
-            cmdhandler(self, text, callertype="session", sessid=self.sessid)
-            self.update_session_counters()
+            self.data_out(text=text, **kwargs)
+        else:
+            self.data_out(**kwargs)
 
-    execute_cmd = data_in  # alias
-
-    def data_out(self, text=None, **kwargs):
+    def execute_cmd(self, raw_string, **kwargs):
         """
-        Send Evennia -> User
+        Do something as this object. This method is normally never
+        called directly, instead incoming command instructions are
+        sent to the appropriate inputfunc already at the sessionhandler
+        level. This method allows Python code to inject commands into
+        this stream, and will lead to the text inputfunc be called.
 
+        Args:
+            raw_string (string): Raw command input
         Kwargs:
-            text (str): A text to relay
-            kwargs (any): Other parameters to the protocol.
+            Other keyword arguments will be added to the found command
+            object instace as variables before it executes.  This is
+            unused by default Evennia but may be used to set flags and
+            change operating paramaters for commands at run-time.
 
         """
-        text = text if text else ""
-        if _INLINEFUNC_ENABLED and not "raw" in kwargs:
-            text = parse_inlinefunc(text, strip="strip_inlinefunc" in kwargs, session=self)
-        if self.screenreader:
-            global _ANSI
-            if not _ANSI:
-                from evennia.utils import ansi as _ANSI
-            text = _ANSI.parse_ansi(text, strip_ansi=True, xterm256=False, mxp=False)
-            text = _RE_SCREENREADER_REGEX.sub("", text)
-        session = kwargs.pop('session', None)
-        session = session or self
-        self.sessionhandler.data_out(session, text=text, **kwargs)
-    # alias
-    msg = data_out
+        # inject instruction into input stream
+        kwargs["text"] = ((raw_string,), {})
+        self.sessionhandler.data_in(self, **kwargs)
 
     def __eq__(self, other):
         "Handle session comparisons"
@@ -301,6 +443,8 @@ class ServerSession(Session):
         "Unicode representation"
         return u"%s" % str(self)
 
+
+
     # Dummy API hooks for use during non-loggedin operation
 
     def at_cmdset_get(self, **kwargs):
@@ -314,6 +458,14 @@ class ServerSession(Session):
     # (note that no databse is involved at all here. session.db.attr =
     # value just saves a normal property in memory, just like ndb).
 
+    @lazy_property
+    def nattributes(self):
+        return NAttributeHandler(self)
+
+    @lazy_property
+    def attributes(self):
+        return self.nattributes
+
     #@property
     def ndb_get(self):
         """
@@ -326,19 +478,7 @@ class ServerSession(Session):
         try:
             return self._ndb_holder
         except AttributeError:
-            class NdbHolder(object):
-                "Holder for storing non-persistent attributes."
-                def all(self):
-                    return [val for val in self.__dict__.keys()
-                            if not val.startswith['_']]
-
-                def __getattribute__(self, key):
-                    # return None if no matching attribute was found.
-                    try:
-                        return object.__getattribute__(self, key)
-                    except AttributeError:
-                        return None
-            self._ndb_holder = NdbHolder()
+            self._ndb_holder = NDbHolder(self, "nattrhandler", manager_name="nattributes")
             return self._ndb_holder
 
     #@ndb.setter

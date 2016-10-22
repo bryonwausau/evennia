@@ -33,6 +33,10 @@ Possible keywords are:
     aliases - string or list of strings
     tags - string or list of strings
     ndb_<name> - value of a nattribute (ndb_ is stripped)
+    exec - this is a string of python code to execute or a list of such codes.
+        This can be used e.g. to trigger custom handlers on the object. The
+        execution environment contains 'evennia' for the library and 'obj'
+        for accessing the just created object.
     any other keywords are interpreted as Attributes and their values.
 
 Each value can also be a callable that takes no arguments. It should
@@ -75,6 +79,7 @@ otherwise have the same spells as a *goblin wizard* who in turn shares
 many traits with a normal *goblin*.
 
 """
+from __future__ import print_function
 
 import copy
 #TODO
@@ -83,6 +88,7 @@ import copy
 
 from django.conf import settings
 from random import randint
+import evennia
 from evennia.objects.models import ObjectDB
 from evennia.utils.utils import make_iter, all_from_module, dbid_to_obj
 
@@ -92,7 +98,10 @@ _handle_dbref = lambda inp: dbid_to_obj(inp, ObjectDB)
 
 
 def _validate_prototype(key, prototype, protparents, visited):
-    "Run validation on a prototype, checking for inifinite regress"
+    """
+    Run validation on a prototype, checking for inifinite regress.
+
+    """
     assert isinstance(prototype, dict)
     if id(prototype) in visited:
         raise RuntimeError("%s has infinite nesting of prototypes." % key or prototype)
@@ -110,9 +119,10 @@ def _validate_prototype(key, prototype, protparents, visited):
 
 def _get_prototype(dic, prot, protparents):
     """
-    Recursively traverse a prototype dictionary,
-    including multiple inheritance. Use _validate_prototype
-    before this, we don't check for infinite recursion here.
+    Recursively traverse a prototype dictionary, including multiple
+    inheritance. Use _validate_prototype before this, we don't check
+    for infinite recursion here.
+
     """
     if "prototype" in dic:
         # move backwards through the inheritance
@@ -130,10 +140,11 @@ def _batch_create_object(*objparams):
     optimized for speed. It does NOT check and convert various input
     so make sure the spawned Typeclass works before using this!
 
-    Input:
-    objsparams - each argument should be a tuple of arguments for the respective
-                 creation/add handlers in the following order:
-                    (create, permissions, locks, aliases, nattributes, attributes)
+    Args:
+        objsparams (any): Aach argument should be a tuple of arguments
+            for the respective creation/add handlers in the following
+            order: (create, permissions, locks, aliases, nattributes,
+            attributes)
     Returns:
         objects (list): A list of created objects
 
@@ -159,6 +170,10 @@ def _batch_create_object(*objparams):
                            "tags":objparam[6]}
         # this triggers all hooks
         obj.save()
+        # run eventual extra code
+        for code in objparam[7]:
+            if code:
+                exec(code, {}, {"evennia": evennia, "obj": obj})
         objs.append(obj)
     return objs
 
@@ -168,16 +183,17 @@ def spawn(*prototypes, **kwargs):
     Spawn a number of prototyped objects. Each argument should be a
     prototype dictionary.
 
-    keyword args:
-        prototype_modules - a python-path to a
-            prototype module, or a list of such paths. These will be used
-            to build the global protparents dictionary accessible by the
-            input prototypes. If not given, it will instead look for modules
+    Kwargs:
+        prototype_modules (str or list): A python-path to a prototype
+            module, or a list of such paths. These will be used to build
+            the global protparents dictionary accessible by the input
+            prototypes. If not given, it will instead look for modules
             defined by settings.PROTOTYPE_MODULES.
-        prototype_parents - a dictionary holding a custom prototype-parent dictionary. Will
-                      overload same-named prototypes from prototype_modules.
-        return_prototypes - only return a list of the prototype-parents
-                            (no object creation happens)
+        prototype_parents (dict): A dictionary holding a custom
+            prototype-parent dictionary. Will overload same-named
+            prototypes from prototype_modules.
+        return_prototypes (bool): Only return a list of the
+            prototype-parents (no object creation happens)
     """
 
     protparents = {}
@@ -204,22 +220,38 @@ def spawn(*prototypes, **kwargs):
         if not prot:
             continue
 
-        # extract the keyword args we need to create the object itself
+        # extract the keyword args we need to create the object itself. If we get a callable,
+        # call that to get the value (don't catch errors)
         create_kwargs = {}
-        create_kwargs["db_key"] = prot.pop("key", "Spawned Object %06i" % randint(1,100000))
-        create_kwargs["db_location"] = _handle_dbref(prot.pop("location", None))
-        create_kwargs["db_home"] = _handle_dbref(prot.pop("home", settings.DEFAULT_HOME))
-        create_kwargs["db_destination"] = _handle_dbref(prot.pop("destination", None))
-        create_kwargs["db_typeclass_path"] = prot.pop("typeclass", settings.BASE_OBJECT_TYPECLASS)
+        keyval = prot.pop("key", "Spawned Object %06i" % randint(1,100000))
+        create_kwargs["db_key"] = keyval() if callable(keyval) else keyval
+
+        locval  = prot.pop("location", None)
+        create_kwargs["db_location"] = locval() if callable(locval) else _handle_dbref(locval)
+
+        homval = prot.pop("home", settings.DEFAULT_HOME)
+        create_kwargs["db_home"] = homval() if callable(homval) else _handle_dbref(homval)
+
+        destval = prot.pop("destination", None)
+        create_kwargs["db_destination"] = destval() if callable(destval) else _handle_dbref(destval)
+
+        typval = prot.pop("typeclass", settings.BASE_OBJECT_TYPECLASS)
+        create_kwargs["db_typeclass_path"] = typval() if callable(typval) else typval
 
         # extract calls to handlers
-        permission_string = prot.pop("permissions", "")
-        lock_string = prot.pop("locks", "")
-        alias_string = prot.pop("aliases", "")
-        tags = prot.pop("tags", "")
+        permval = prot.pop("permissions", "")
+        permission_string = permval() if callable(permval) else permval
+        lockval = prot.pop("locks", "")
+        lock_string = lockval() if callable(lockval) else lockval
+        aliasval = prot.pop("aliases", "")
+        alias_string =  aliasval() if callable(aliasval) else aliasval
+        tagval = prot.pop("tags", "")
+        tags = tagval() if callable(tagval) else tagval
+        exval = prot.pop("exec", "")
+        execs = make_iter(exval() if callable(exval) else exval)
 
         # extract ndb assignments
-        nattributes = dict((key.split("_", 1)[1], value if callable(value) else value)
+        nattributes = dict((key.split("_", 1)[1], value() if callable(value) else value)
                             for key, value in prot.items() if key.startswith("ndb_"))
 
         # the rest are attributes
@@ -229,7 +261,7 @@ def spawn(*prototypes, **kwargs):
 
         # pack for call into _batch_create_object
         objsparams.append( (create_kwargs, permission_string, lock_string,
-                            alias_string, nattributes, attributes, tags) )
+                            alias_string, nattributes, attributes, tags, execs) )
 
     return _batch_create_object(*objsparams)
 
@@ -268,4 +300,4 @@ if __name__ == "__main__":
             }
         }
     # test
-    print [o.key for o in spawn(protparents["GOBLIN"], protparents["GOBLIN_ARCHWIZARD"], prototype_parents=protparents)]
+    print([o.key for o in spawn(protparents["GOBLIN"], protparents["GOBLIN_ARCHWIZARD"], prototype_parents=protparents)])

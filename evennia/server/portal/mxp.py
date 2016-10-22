@@ -13,9 +13,10 @@ http://www.mushclient.com/mushclient/mxp.htm
 http://www.gammon.com.au/mushclient/addingservermxp.htm
 
 """
+from builtins import object
 import re
 
-LINKS_SUB =  re.compile(r'\{lc(.*?)\{lt(.*?)\{le', re.DOTALL)
+LINKS_SUB = re.compile(r'\|lc(.*?)\|lt(.*?)\|le', re.DOTALL)
 
 MXP = "\x5B"
 MXP_TEMPSECURE = "\x1B[4z"
@@ -81,5 +82,5 @@ class Mxp(object):
 
         """
         self.protocol.protocol_flags["MXP"] = True
-        self.protocol.handshake_done()
         self.protocol.requestNegotiation(MXP, '')
+        self.protocol.handshake_done()

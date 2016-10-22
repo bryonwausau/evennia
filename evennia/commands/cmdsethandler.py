@@ -63,7 +63,10 @@ can then implement separate sets for different situations. For
 example, you can have a 'On a boat' set, onto which you then tack on
 the 'Fishing' set. Fishing from a boat? No problem!
 """
+from builtins import object
+from future.utils import raise_
 import sys
+from traceback import format_exc
 from importlib import import_module
 from inspect import trace
 from django.conf import settings
@@ -76,6 +79,29 @@ __all__ = ("import_cmdset", "CmdSetHandler")
 
 _CACHED_CMDSETS = {}
 _CMDSET_PATHS = utils.make_iter(settings.CMDSET_PATHS)
+_IN_GAME_ERRORS = settings.IN_GAME_ERRORS
+
+# Output strings
+
+_ERROR_CMDSET_IMPORT = _(
+"""{traceback}
+Error loading cmdset '{path}'
+(Traceback was logged {timestamp})""")
+
+_ERROR_CMDSET_KEYERROR = _(
+"""Error loading cmdset: No cmdset class '{classname}' in '{path}'.
+(Traceback was logged {timestamp})""")
+
+_ERROR_CMDSET_SYNTAXERROR = _(
+"""{traceback}
+SyntaxError encountered when loading cmdset '{path}'.
+(Traceback was logged {timestamp})""")
+
+_ERROR_CMDSET_EXCEPTION = _(
+"""{traceback}
+Compile/Run error when loading cmdset '{path}'.",
+(Traceback was logged {timestamp})""")
+
 
 class _ErrorCmdSet(CmdSet):
     """
@@ -127,7 +153,6 @@ def import_cmdset(path, cmdsetobj, emit_to_obj=None, no_logging=False):
 
         try:
             # first try to get from cache
-            #print "importing %s: _CACHED_CMDSETS=%s" % (python_path, _CACHED_CMDSETS)
             cmdsetclass = _CACHED_CMDSETS.get(python_path, None)
 
             if not cmdsetclass:
@@ -137,7 +162,7 @@ def import_cmdset(path, cmdsetobj, emit_to_obj=None, no_logging=False):
                     if len(trace()) > 2:
                         # error in module, make sure to not hide it.
                         exc = sys.exc_info()
-                        raise exc[1], None, exc[2]
+                        raise_(exc[1], None, exc[2])
                     else:
                         # try next suggested path
                         errstring += _("\n(Unsuccessfully tried '%s')." % python_path)
@@ -148,7 +173,7 @@ def import_cmdset(path, cmdsetobj, emit_to_obj=None, no_logging=False):
                     if len(trace()) > 2:
                         # Attribute error within module, don't hide it
                         exc = sys.exc_info()
-                        raise exc[1], None, exc[2]
+                        raise_(exc[1], None, exc[2])
                     else:
                         errstring += _("\n(Unsuccessfully tried '%s')." % python_path)
                         continue
@@ -159,37 +184,47 @@ def import_cmdset(path, cmdsetobj, emit_to_obj=None, no_logging=False):
                 cmdsetclass = cmdsetclass(cmdsetobj)
             errstring = ""
             return cmdsetclass
-        except ImportError, e:
+        except ImportError as err:
             logger.log_trace()
-            errstring += _("\nError loading cmdset {path}: \"{error}\"")
-            errstring = errstring.format(path=python_path, error=e)
+            errstring += _ERROR_CMDSET_IMPORT
+            if _IN_GAME_ERRORS:
+                errstring = errstring.format(path=python_path, traceback=format_exc(), timestamp=logger.timeformat())
+            else:
+                errstring = errstring.format(path=python_path, traceback=err, timestamp=logger.timeformat())
             break
         except KeyError:
             logger.log_trace()
-            errstring += _("\nError in loading cmdset: No cmdset class '{classname}' in {path}.")
-            errstring = errstring.format(classname=classname, path=python_path)
+            errstring += _ERROR_CMDSET_KEYERROR
+            errstring = errstring.format(classname=classname, path=python_path, timestamp=logger.timeformat())
             break
-        except SyntaxError, e:
+        except SyntaxError as err:
             logger.log_trace()
-            errstring += _("\nSyntaxError encountered when loading cmdset '{path}': \"{error}\".")
-            errstring = errstring.format(path=python_path, error=e)
+            errstring += _ERROR_CMDSET_SYNTAXERROR
+            if _IN_GAME_ERRORS:
+                errstring = errstring.format(path=python_path, traceback=format_exc(), timestamp=logger.timeformat())
+            else:
+                errstring = errstring.format(path=python_path, traceback=err, timestamp=logger.timeformat())
             break
-        except Exception, e:
+        except Exception as err:
             logger.log_trace()
-            errstring += _("\nCompile/Run error when loading cmdset '{path}': \"{error}\".")
-            errstring = errstring.format(path=python_path, error=e)
+            errstring += _ERROR_CMDSET_EXCEPTION
+            if _IN_GAME_ERRORS:
+                errstring = errstring.format(path=python_path, traceback=format_exc(), timestamp=logger.timeformat())
+            else:
+                errstring = errstring.format(path=python_path, traceback=err, timestamp=logger.timeformat())
             break
 
     if errstring:
         # returning an empty error cmdset
         errstring = errstring.strip()
         if not no_logging:
-            logger.log_errmsg(errstring)
+            logger.log_err(errstring)
             if emit_to_obj and not ServerConfig.objects.conf("server_starting_mode"):
                 emit_to_obj.msg(errstring)
         err_cmdset = _ErrorCmdSet()
-        err_cmdset.errmessage = errstring +  _("\n (See log for details.)")
+        err_cmdset.errmessage = errstring
         return err_cmdset
+
 
 # classes
 
@@ -243,7 +278,6 @@ class CmdSetHandler(object):
         mergelist = []
         if len(self.cmdset_stack) > 1:
             # We have more than one cmdset in stack; list them all
-            #print self.cmdset_stack, self.mergetype_stack
             for snum, cmdset in enumerate(self.cmdset_stack):
                 mergetype = self.mergetype_stack[snum]
                 permstring = "non-perm"
@@ -310,7 +344,6 @@ class CmdSetHandler(object):
         if init_mode:
             # reimport all permanent cmdsets
             storage = self.obj.cmdset_storage
-            #print "cmdset_storage:", self.obj.cmdset_storage
             if storage:
                 self.cmdset_stack = []
                 for pos, path in enumerate(storage):
@@ -340,8 +373,8 @@ class CmdSetHandler(object):
         is set as the default one (it will then end up at the bottom of the stack)
 
         Args:
-          cmdset (CmdSet or str): Can be a cmdset object or the python path
-            to such an object.
+            cmdset (CmdSet or str): Can be a cmdset object or the python path
+                to such an object.
             emit_to_obj (Object, optional): An object to receive error messages.
             permanent (bool, optional): This cmdset will remain across a server reboot.
             default_cmdset (Cmdset, optional): Insert this to replace the
@@ -504,12 +537,13 @@ class CmdSetHandler(object):
             self.obj.cmdset_storage = storage
         self.update()
 
-    def has_cmdset(self, cmdset_key, must_be_default=False):
+    def has(self, cmdset, must_be_default=False):
         """
-        checks so the cmdsethandler contains a cmdset with the given key.
+        checks so the cmdsethandler contains a given cmdset
 
         Args:
-            cmdset_key (str): Cmdset key to check
+            cmdset (str or Cmdset): Cmdset key, pythonpath or
+                Cmdset to check the existence for.
             must_be_default (bool, optional): Only return True if
                 the checked cmdset is the default one.
 
@@ -517,10 +551,27 @@ class CmdSetHandler(object):
             has_cmdset (bool): Whether or not the cmdset is in the handler.
 
         """
-        if must_be_default:
-            return self.cmdset_stack and self.cmdset_stack[0].key == cmdset_key
+        if callable(cmdset) and hasattr(cmdset, 'path'):
+            # try it as a callable
+            print "Try callable", cmdset
+            if must_be_default:
+                return self.cmdset_stack and (self.cmdset_stack[0].path == cmdset.path)
+            else:
+                print [cset.path for cset in self.cmdset_stack], cmdset.path
+                return any([cset for cset in self.cmdset_stack
+                                        if cset.path == cmdset.path])
         else:
-            return any([cmdset.key == cmdset_key for cmdset in self.cmdset_stack])
+            # try it as a path or key
+            if must_be_default:
+                return self.cmdset_stack and (
+                        self.cmdset_stack[0].key == cmdset or
+                        self.cmdset_stack[0].path == cmdset)
+            else:
+                return any([cset for cset in self.cmdset_stack
+                              if cset.path == cmdset or cset.key == cmdset])
+
+    # backwards-compatability alias
+    has_cmdset = has
 
     def reset(self):
         """

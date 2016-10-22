@@ -4,14 +4,16 @@ the game engine.
 
 This module should be started with the 'twistd' executable since it
 sets up all the networking features.  (this is done automatically
-by game/evennia.py).
+by evennia/server/server_runner.py).
 
 """
+from __future__ import print_function
+from builtins import object
 import time
 import sys
 import os
 
-from twisted.web import server, static
+from twisted.web import static
 from twisted.application import internet, service
 from twisted.internet import reactor, defer
 from twisted.internet.task import LoopingCall
@@ -46,8 +48,14 @@ SERVER_RESTART = os.path.join(settings.GAME_DIR, "server", 'server.restart')
 # module containing hook methods called during start_stop
 SERVER_STARTSTOP_MODULE = mod_import(settings.AT_SERVER_STARTSTOP_MODULE)
 
-# module containing plugin services
+# modules containing plugin services
 SERVER_SERVICES_PLUGIN_MODULES = [mod_import(module) for module in make_iter(settings.SERVER_SERVICES_PLUGIN_MODULES)]
+try:
+    WEB_PLUGINS_MODULE = mod_import(settings.WEB_PLUGINS_MODULE)
+except ImportError:
+    WEB_PLUGINS_MODULE = None
+    print ("WARNING: settings.WEB_PLUGINS_MODULE not found - "
+           "copy 'evennia/game_template/server/conf/web_plugins.py to mygame/server/conf.")
 
 #------------------------------------------------------------
 # Evennia Server settings
@@ -211,7 +219,7 @@ class Evennia(object):
             #from evennia.players.models import PlayerDB
             for i, prev, curr in ((i, tup[0], tup[1]) for i, tup in enumerate(settings_compare) if i in mismatches):
                 # update the database
-                print " %s:\n '%s' changed to '%s'. Updating unchanged entries in database ..." % (settings_names[i], prev, curr)
+                print(" %s:\n '%s' changed to '%s'. Updating unchanged entries in database ..." % (settings_names[i], prev, curr))
                 if i == 0:
                     ObjectDB.objects.filter(db_cmdset_storage__exact=prev).update(db_cmdset_storage=curr)
                 if i == 1:
@@ -245,18 +253,18 @@ class Evennia(object):
         if not last_initial_setup_step:
             # None is only returned if the config does not exist,
             # i.e. this is an empty DB that needs populating.
-            print ' Server started for the first time. Setting defaults.'
+            print(' Server started for the first time. Setting defaults.')
             initial_setup.handle_setup(0)
-            print '-' * 50
+            print('-' * 50)
         elif int(last_initial_setup_step) >= 0:
             # a positive value means the setup crashed on one of its
             # modules and setup will resume from this step, retrying
             # the last failed module. When all are finished, the step
             # is set to -1 to show it does not need to be run again.
-            print ' Resuming initial setup from step %(last)s.' % \
-                {'last': last_initial_setup_step}
+            print(' Resuming initial setup from step %(last)s.' % \
+                {'last': last_initial_setup_step})
             initial_setup.handle_setup(int(last_initial_setup_step))
-            print '-' * 50
+            print('-' * 50)
 
     def run_init_hooks(self):
         """
@@ -268,18 +276,17 @@ class Evennia(object):
         #update eventual changed defaults
         self.update_defaults()
 
-        #print "run_init_hooks:", ObjectDB.get_all_cached_instances()
         [o.at_init() for o in ObjectDB.get_all_cached_instances()]
         [p.at_init() for p in PlayerDB.get_all_cached_instances()]
 
         with open(SERVER_RESTART, 'r') as f:
             mode = f.read()
         if mode in ('True', 'reload'):
-            from evennia.server.oobhandler import OOB_HANDLER
-            OOB_HANDLER.restore()
+            from evennia.scripts.monitorhandler import MONITOR_HANDLER
+            MONITOR_HANDLER.restore()
 
         from evennia.scripts.tickerhandler import TICKER_HANDLER
-        TICKER_HANDLER.restore()
+        TICKER_HANDLER.restore(mode in ('True', 'reload'))
 
         # call correct server hook based on start file value
         if mode in ('True', 'reload'):
@@ -348,12 +355,12 @@ class Evennia(object):
             ServerConfig.objects.conf("server_restart_mode", "reload")
             yield [o.at_server_reload() for o in ObjectDB.get_all_cached_instances()]
             yield [p.at_server_reload() for p in PlayerDB.get_all_cached_instances()]
-            yield [(s.pause(), s.at_server_reload()) for s in ScriptDB.get_all_cached_instances()]
+            yield [(s.pause(manual_pause=False), s.at_server_reload()) for s in ScriptDB.get_all_cached_instances() if s.is_active]
             yield self.sessions.all_sessions_portal_sync()
             self.at_server_reload_stop()
-            # only save OOB state on reload, not on shutdown/reset
-            from evennia.server.oobhandler import OOB_HANDLER
-            OOB_HANDLER.save()
+            # only save monitor state on reload, not on shutdown/reset
+            from evennia.scripts.monitorhandler import MONITOR_HANDLER
+            MONITOR_HANDLER.save()
         else:
             if mode == 'reset':
                 # like shutdown but don't unset the is_connected flag and don't disconnect sessions
@@ -367,7 +374,7 @@ class Evennia(object):
                 yield [(p.unpuppet_all(), p.at_server_shutdown())
                                        for p in PlayerDB.get_all_cached_instances()]
                 yield ObjectDB.objects.clear_all_sessids()
-            yield [(s.pause(), s.at_server_reload()) for s in ScriptDB.get_all_cached_instances()]
+            yield [(s.pause(manual_pause=False), s.at_server_shutdown()) for s in ScriptDB.get_all_cached_instances()]
             ServerConfig.objects.conf("server_restart_mode", "reset")
             self.at_server_cold_stop()
 
@@ -431,10 +438,20 @@ class Evennia(object):
         This is called only when the server starts "cold", i.e. after a
         shutdown or a reset.
         """
+        # We need to do this just in case the server was killed in a way where
+        # the normal cleanup operations did not have time to run.
+        from evennia.objects.models import ObjectDB
+        ObjectDB.objects.clear_all_sessids()
+
+        # Remove non-persistent scripts
+        from evennia.scripts.models import ScriptDB
+        for script in ScriptDB.objects.filter(db_persistent=False):
+            script.stop()
+
         if GUEST_ENABLED:
             for guest in PlayerDB.objects.all().filter(db_typeclass_path=settings.BASE_GUEST_TYPECLASS):
-                for character in filter(None, guest.db._playable_characters):
-                    character.delete()
+                for character in guest.db._playable_characters:
+                    if character: character.delete()
                 guest.delete()
         if SERVER_STARTSTOP_MODULE:
             SERVER_STARTSTOP_MODULE.at_server_cold_start()
@@ -463,8 +480,8 @@ application = service.Application('Evennia')
 # and is where we store all the other services.
 EVENNIA = Evennia(application)
 
-print '-' * 50
-print ' %(servername)s Server (%(version)s) started.' % {'servername': SERVERNAME, 'version': VERSION}
+print('-' * 50)
+print(' %(servername)s Server (%(version)s) started.' % {'servername': SERVERNAME, 'version': VERSION})
 
 if AMP_ENABLED:
 
@@ -475,7 +492,7 @@ if AMP_ENABLED:
     ifacestr = ""
     if AMP_INTERFACE != '127.0.0.1':
         ifacestr = "-%s" % AMP_INTERFACE
-    print '  amp (to Portal)%s: %s' % (ifacestr, AMP_PORT)
+    print('  amp (to Portal)%s: %s' % (ifacestr, AMP_PORT))
 
     from evennia.server import amp
 
@@ -489,7 +506,7 @@ if WEBSERVER_ENABLED:
     # Start a django-compatible webserver.
 
     from twisted.python import threadpool
-    from evennia.server.webserver import DjangoWebRoot, WSGIWebServer
+    from evennia.server.webserver import DjangoWebRoot, WSGIWebServer, Website
 
     # start a thread pool and define the root url (/) as a wsgi resource
     # recognized by Django
@@ -500,7 +517,12 @@ if WEBSERVER_ENABLED:
     web_root.putChild("media", static.File(settings.MEDIA_ROOT))
     # point our static resources to url /static
     web_root.putChild("static", static.File(settings.STATIC_ROOT))
-    web_site = server.Site(web_root, logPath=settings.HTTP_LOG_FILE)
+
+    if WEB_PLUGINS_MODULE:
+        # custom overloads
+        web_root = WEB_PLUGINS_MODULE.at_webserver_root_creation(web_root)
+
+    web_site = Website(web_root, logPath=settings.HTTP_LOG_FILE)
 
     for proxyport, serverport in WEBSERVER_PORTS:
         # create the webserver (we only need the port for this)
@@ -508,7 +530,7 @@ if WEBSERVER_ENABLED:
         webserver.setName('EvenniaWebServer%s' % serverport)
         EVENNIA.services.addService(webserver)
 
-        print "  webserver: %s" % serverport
+        print("  webserver: %s" % serverport)
 
 ENABLED = []
 if IRC_ENABLED:
@@ -524,13 +546,13 @@ if RSS_ENABLED:
     ENABLED.append('rss')
 
 if ENABLED:
-    print "  " + ", ".join(ENABLED) + " enabled."
+    print("  " + ", ".join(ENABLED) + " enabled.")
 
 for plugin_module in SERVER_SERVICES_PLUGIN_MODULES:
     # external plugin protocols
     plugin_module.start_plugin_services(EVENNIA)
 
-print '-' * 50  # end of terminal output
+print('-' * 50)  # end of terminal output
 
 # clear server startup mode
 ServerConfig.objects.conf("server_starting_mode", delete=True)

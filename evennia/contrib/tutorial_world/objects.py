@@ -18,6 +18,7 @@ Weapon
 WeaponRack
 
 """
+from future.utils import listvalues
 
 import random
 
@@ -523,7 +524,7 @@ class CmdShiftRoot(Command):
         self.obj.db.root_pos = root_pos
 
         # Check victory condition
-        if root_pos.values().count(0) == 0: # no roots in middle position
+        if listvalues(root_pos).count(0) == 0: # no roots in middle position
             # This will affect the cmd: lock of CmdPressButton
             self.obj.db.button_exposed = True
             self.caller.msg("Holding aside the root you think you notice something behind it ...")
@@ -534,7 +535,7 @@ class CmdPressButton(Command):
     Presses a button.
     """
     key = "press"
-    aliases = ["press button", "button", "push", "push button"]
+    aliases = ["press button", "button", "push button"]
     # only accessible if the button was found and there is light. This checks
     # the Attribute button_exposed on the Wall object so that
     # you can only push the button when the puzzle is solved. It also
@@ -614,7 +615,7 @@ class CrumblingWall(TutorialObject, DefaultExit):
         # this is not even an Exit until it has a proper destination, and we won't assign
         # that until it is actually open. Until then we store the destination here. This
         # should be given a reasonable value at creation!
-        self.db.destination = 2
+        self.db.destination = "#2"
 
         # we lock this Exit so that one can only execute commands on it
         # if its location is lit and only traverse it once the Attribute
@@ -977,7 +978,7 @@ WEAPON_PROTOTYPES = {
         "damage": 10},
     "hawkblade": {
         "prototype": "ghostblade",
-        "key": "The Hawblade",
+        "key": "The Hawkblade",
         "aliases": ["hawk", "blade"],
         "desc": "The weapon of a long-dead heroine and a more civilized age, the hawk-shaped hilt of this blade almost has a life of its own.",
         "hit": 0.85,

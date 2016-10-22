@@ -12,6 +12,7 @@ value - which may change as Evennia is developed. This way you can
 always be sure of what you have changed and what is default behaviour.
 
 """
+from builtins import range
 
 import os
 import sys
@@ -22,6 +23,9 @@ import sys
 
 # This is the name of your game. Make it catchy!
 SERVERNAME = "Evennia"
+# Lockdown mode will cut off the game from any external connections
+# and only allow connections from localhost. Requires a cold reboot.
+LOCKDOWN_MODE = False
 # Activate telnet service
 TELNET_ENABLED = True
 # A list of ports the Evennia telnet server listens on Can be one or many.
@@ -32,7 +36,7 @@ TELNET_INTERFACES = ['0.0.0.0']
 # special commands and data with enabled Telnet clients. This is used
 # to create custom client interfaces over a telnet connection. To make
 # full use of OOB, you need to prepare functions to handle the data
-# server-side (see OOB_FUNC_MODULE). TELNET_ENABLED is required for this
+# server-side (see INPUT_FUNC_MODULES). TELNET_ENABLED is required for this
 # to work.
 TELNET_OOB_ENABLED = False
 # Start the evennia django+twisted webserver so you can
@@ -71,9 +75,12 @@ WEBSOCKET_CLIENT_ENABLED = True
 WEBSOCKET_CLIENT_PORT = 8001
 # Interface addresses to listen to. If 0.0.0.0, listen to all. Use :: for IPv6.
 WEBSOCKET_CLIENT_INTERFACE = '0.0.0.0'
-# Actual URL for webclient component to reach the websocket.
-# The WEBSOCKET_CLIENT_PORT will be automatically appended to this URL.
-WEBSOCKET_CLIENT_URL = "ws://localhost"
+# Actual URL for webclient component to reach the websocket. You only need
+# to set this if you know you need it, like using some sort of proxy setup.
+# If given it must be on the form "ws://hostname" (WEBSOCKET_CLIENT_PORT will
+# be automatically appended). If left at None, the client will itself
+# figure out this url based on the server's hostname.
+WEBSOCKET_CLIENT_URL = None
 # Activate SSH protocol communication (SecureShell)
 SSH_ENABLED = False
 # Ports to use for SSH
@@ -86,26 +93,26 @@ SSL_ENABLED = False
 SSL_PORTS = [4001]
 # Interface addresses to listen to. If 0.0.0.0, listen to all. Use :: for IPv6.
 SSL_INTERFACES = ['0.0.0.0']
-# Activate custom websocket support. This is unrelated to the websocket client!
-# This is intended to be used by optional third-party connections/applications
-# or clients.
-WEBSOCKET_ENABLED = False
-# Ports to use for Websockets
-WEBSOCKET_PORTS = [8021]
-# Interface addresses to listen to. If 0.0.0.0, listen to all. Use :: for IPv6.
-WEBSOCKET_INTERFACES = ['0.0.0.0']
 # This determine's whether Evennia's custom admin page is used, or if the
 # standard Django admin is used.
 EVENNIA_ADMIN = True
 # Path to the lib directory containing the bulk of the codebase's code.
 EVENNIA_DIR = os.path.dirname(os.path.abspath(__file__))
-# Path to the game directory (containing the database file if using sqlite).
+# Path to the game directory (containing the server/conf/settings.py file)
+# This is dynamically created- there is generally no need to change this!
 if sys.argv[1] == 'test' if len(sys.argv)>1 else False:
     # unittesting mode
     GAME_DIR = os.getcwd()
 else:
     # Fallback location (will be replaced by the actual game dir at runtime)
     GAME_DIR = os.path.join(EVENNIA_DIR, 'game_template')
+    for i in range(10):
+        gpath = os.getcwd()
+        if "server" in os.listdir(gpath):
+            if os.path.isfile(os.path.join("server", "conf", "settings.py")):
+                GAME_DIR = gpath
+                break
+        os.chdir(os.pardir)
 
 # Place to put log files
 LOG_DIR = os.path.join(GAME_DIR, 'server', 'logs')
@@ -134,7 +141,9 @@ LANGUAGE_CODE = 'en-us'
 IDLE_TIMEOUT = 3600
 # The idle command can be sent to keep your session active without actually
 # having to spam normal commands regularly. It gives no feedback, only updates
-# the idle timer.
+# the idle timer. Note that "idle" will *always* work, even if a different
+# command-name is given here; this is because the webclient needs a default
+# to send to avoid proxy timeouts.
 IDLE_COMMAND = "idle"
 # The set of encodings tried. A Player object may set an attribute "encoding" on
 # itself to match the client used. If not set, or wrong encoding is
@@ -183,7 +192,7 @@ IDMAPPER_CACHE_MAXSIZE = 200      # (MB)
 # accept, as a DoS countermeasure. If the rate exceeds this number, incoming
 # connections will be queued to this rate, so none will be lost.
 # Must be set to a value > 0.
-MAX_CONNECTION_RATE = 5
+MAX_CONNECTION_RATE = 2
 # Determine how many commands per second a given Session is allowed
 # to send to the Portal via a connected protocol. Too high rate will
 # drop the command and echo a warning. Note that this will also cap
@@ -192,6 +201,11 @@ MAX_CONNECTION_RATE = 5
 MAX_COMMAND_RATE = 80
 # The warning to echo back to users if they send commands too fast
 COMMAND_RATE_WARNING ="You entered commands too fast. Wait a moment and try again."
+# If this is true, errors and tracebacks from the engine will be
+# echoed as text in-game as well as to the log. This can speed up
+# debugging. Showing full tracebacks to regular users could be a
+# security problem - this should *not* be active in a production game!
+IN_GAME_ERRORS = False
 
 ######################################################################
 # Evennia Database config
@@ -233,16 +247,29 @@ CONN_MAX_AGE = 3600 * 7
 # The command parser module to use. See the default module for which
 # functions it must implement
 COMMAND_PARSER = "evennia.commands.cmdparser.cmdparser"
-# The handler that outputs errors when searching
-# objects using object.search().
-SEARCH_AT_RESULT = "evennia.commands.cmdparser.at_search_result"
-# The parser used in order to separate multiple
-# object matches (so you can separate between same-named
-# objects without using dbrefs).
-SEARCH_AT_MULTIMATCH_INPUT = "evennia.commands.cmdparser.at_multimatch_input"
-# The parser used in order to separate multiple
-# command matches (so you can separate between same-named commands)
-SEARCH_AT_MULTIMATCH_CMD = "evennia.commands.cmdparser.at_multimatch_cmd"
+# On a multi-match when search objects or commands, the user has the
+# ability to search again with an index marker that differentiates
+# the results. If multiple "box" objects
+# are found, they can by default be separated as 1-box, 2-box. Below you
+# can change the regular expression used. The regex must have one
+# have two capturing groups (?P<prefix>...) and (?P<name>...) - the default
+# parser expects this. It should
+# also involve a number starting from 1. When changing this you must also
+# update SEARCH_MULTIMATCH_TEMPLATE to properly describe the syntax.
+SEARCH_MULTIMATCH_REGEX = r"(?P<number>[0-9]+)-(?P<name>.*)"
+# To display multimatch errors we must display each multimatch in a way that
+# instructs users to separate their multimatches in a way SEARCH_MULTIMATCH_REGEX
+# above understands; for example by making sure they must write 1-box, 2-box etc.
+# The template must contain {number} - a number to separate multi-matches, starting
+# from 1; {name} - the name of the multimatched entity; {aliases} - eventual
+# aliases for the entity; {info} - extra info like #dbrefs for staff. Don't
+# forget a line break if you want one match per line.
+SEARCH_MULTIMATCH_TEMPLATE = " {number}-{name}{aliases}{info}\n"
+# The handler that outputs errors when using any API-level search
+# (not manager methods). This function should correctly report errors
+# both for command- and object-searches. This allows full control
+# over the error output (it uses SEARCH_MULTIMATCH_TEMPLATE by default).
+SEARCH_AT_RESULT = "evennia.utils.utils.at_search_result"
 # The module holding text strings for the connection screen.
 # This module should contain one or more variables
 # with strings defining the look of the screen.
@@ -269,13 +296,17 @@ PORTAL_SERVICES_PLUGIN_MODULES = ["server.conf.portal_services_plugins"]
 # Module holding MSSP meta data. This is used by MUD-crawlers to determine
 # what type of game you are running, how many players you have etc.
 MSSP_META_MODULE = "server.conf.mssp"
+# Module for web plugins.
+WEB_PLUGINS_MODULE = "server.conf.web_plugins"
 # Tuple of modules implementing lock functions. All callable functions
 # inside these modules will be available as lock functions.
 LOCK_FUNC_MODULES = ("evennia.locks.lockfuncs", "server.conf.lockfuncs",)
-# Module holding OOB (Out of Band) hook objects. This allows for customization
-# and expansion of which hooks OOB protocols are allowed to call on the server
-# protocols for attaching tracker hooks for when various object field change
-OOB_PLUGIN_MODULES = ["evennia.server.oob_cmds", "server.conf.oobfuncs"]
+# Module holding handlers for managing incoming data from the client. These
+# will be loaded in order, meaning functions in later modules may overload
+# previous ones if having the same name.
+INPUT_FUNC_MODULES = ["evennia.server.inputfuncs", "server.conf.inputfuncs"]
+# Modules that contain prototypes for use with the spawner mechanism.
+PROTOTYPE_MODULES = ["world.prototypes"]
 # Module holding settings/actions for the dummyrunner program (see the
 # dummyrunner for more information)
 DUMMYRUNNER_SETTINGS_MODULE = "evennia.server.profiling.dummyrunner_settings"
@@ -299,6 +330,14 @@ CMDSET_CHARACTER = "commands.default_cmdsets.CharacterCmdSet"
 CMDSET_PLAYER = "commands.default_cmdsets.PlayerCmdSet"
 # Location to search for cmdsets if full path not given
 CMDSET_PATHS = ["commands", "evennia", "contribs"]
+# Parent class for all default commands. Changing this class will
+# modify all default commands, so do so carefully.
+COMMAND_DEFAULT_CLASS = "evennia.commands.default.muxcommand.MuxCommand"
+# The Channel Handler will create a command to represent each channel,
+# creating it with the key of the channel, its aliases, locks etc. The
+# default class logs channel messages to a file and allows for /history.
+# This setting allows to override the command class used with your own.
+CHANNEL_COMMAND_CLASS = "evennia.comms.channelhandler.ChannelCommand"
 
 ######################################################################
 # Typeclasses and other paths
@@ -376,15 +415,16 @@ TIME_MONTH_PER_YEAR = 12
 ######################################################################
 # Inlinefunc
 ######################################################################
-# Evennia supports inline function preprocessing. This allows
-# users to supply {func() ... {/func in text, performing dynamic
-# text formatting and manipulation on the fly. If disabled, such
-# inline functions will not be parsed.
+# Evennia supports inline function preprocessing. This allows users
+# to supply inline calls on the form $func(arg, arg, ...) to do
+# session-aware text formatting and manipulation on the fly. If
+# disabled, such inline functions will not be parsed.
 INLINEFUNC_ENABLED = False
 # Only functions defined globally (and not starting with '_') in
 # these modules will be considered valid inlinefuncs. The list
 # is loaded from left-to-right, same-named functions will overload
-INLINEFUNC_MODULES = ["evennia.utils.inlinefunc", "server.conf.inlinefunc"]
+INLINEFUNC_MODULES = ["evennia.utils.inlinefuncs",
+                      "server.conf.inlinefuncs"]
 
 ######################################################################
 # Default Player setup and access
@@ -562,7 +602,7 @@ LOCALE_PATHS = [os.path.join(EVENNIA_DIR, "locale/")]
 SERVE_MEDIA = False
 # The master urlconf file that contains all of the sub-branches to the
 # applications. Change this to add your own URLs to the website.
-ROOT_URLCONF = 'web.urls' #src.web.urls?
+ROOT_URLCONF = 'web.urls'
 # Where users are redirected after logging in via contrib.auth.login.
 LOGIN_REDIRECT_URL = '/'
 # Where to redirect users when using the @login_required decorator.
@@ -579,25 +619,40 @@ STATIC_URL = '/static/'
 
 STATIC_ROOT = os.path.join(GAME_DIR, "web", "static")
 
-# Directories from which static files will be gathered.
+# Location of static data to overload the defaults from
+# evennia/web/webclient and evennia/web/website's static/ dirs.
 STATICFILES_DIRS = (
-    os.path.join(GAME_DIR, "web", "static_overrides"),
-    os.path.join(EVENNIA_DIR, "web", "static"),)
+    os.path.join(GAME_DIR, "web", "static_overrides"),)
 # Patterns of files in the static directories. Used here to make sure that
 # its readme file is preserved but unused.
 STATICFILES_IGNORE_PATTERNS = ('README.md',)
 # The name of the currently selected web template. This corresponds to the
-# directory names shown in the webtemplates directory.
-ACTIVE_TEMPLATE = 'prosimii'
+# directory names shown in the templates directory.
+WEBSITE_TEMPLATE = 'website'
+WEBCLIENT_TEMPLATE = 'webclient'
 # We setup the location of the website template as well as the admin site.
-TEMPLATE_DIRS = (
-    os.path.join(GAME_DIR, "web", "template_overrides"),
-    os.path.join(EVENNIA_DIR, "web", "templates", ACTIVE_TEMPLATE),
-    os.path.join(EVENNIA_DIR, "web", "templates"),)
-# List of callables that know how to import templates from various sources.
-TEMPLATE_LOADERS = (
-    'django.template.loaders.filesystem.Loader',
-    'django.template.loaders.app_directories.Loader',)
+TEMPLATES = [{
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'DIRS': [
+            os.path.join(GAME_DIR, "web", "template_overrides", WEBSITE_TEMPLATE),
+            os.path.join(GAME_DIR, "web", "template_overrides", WEBCLIENT_TEMPLATE),
+            os.path.join(GAME_DIR, "web", "template_overrides"),
+            os.path.join(EVENNIA_DIR, "web", "website", "templates", WEBSITE_TEMPLATE),
+            os.path.join(EVENNIA_DIR, "web", "website", "templates"),
+            os.path.join(EVENNIA_DIR, "web", "webclient", "templates", WEBCLIENT_TEMPLATE),
+            os.path.join(EVENNIA_DIR, "web", "webclient", "templates")],
+        'APP_DIRS': True,
+        'OPTIONS': {
+            "context_processors": [
+                'django.template.context_processors.i18n',
+                'django.template.context_processors.request',
+                'django.contrib.auth.context_processors.auth',
+                'django.template.context_processors.media',
+                'django.template.context_processors.debug',
+                'evennia.web.utils.general_context.general_context']
+            }
+        }]
+
 # MiddleWare are semi-transparent extensions to Django's functionality.
 # see http://www.djangoproject.com/documentation/middleware/ for a more detailed
 # explanation.
@@ -609,15 +664,6 @@ MIDDLEWARE_CLASSES = (
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.admindocs.middleware.XViewMiddleware',
     'django.contrib.flatpages.middleware.FlatpageFallbackMiddleware',)
-# Context processors define context variables, generally for the template
-# system to use.
-TEMPLATE_CONTEXT_PROCESSORS = (
-    'django.core.context_processors.i18n',
-    'django.core.context_processors.request',
-    'django.contrib.auth.context_processors.auth',
-    'django.core.context_processors.media',
-    'django.core.context_processors.debug',
-    'evennia.web.utils.general_context.general_context',)
 
 ######################################################################
 # Evennia components
@@ -627,12 +673,12 @@ TEMPLATE_CONTEXT_PROCESSORS = (
 # refer to app models and perform DB syncs.
 INSTALLED_APPS = (
     'django.contrib.auth',
-    'django.contrib.sites',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.admin',
     'django.contrib.admindocs',
     'django.contrib.flatpages',
+    'django.contrib.sites',
     'django.contrib.staticfiles',
     'evennia.utils.idmapper',
     'evennia.server',
@@ -642,6 +688,7 @@ INSTALLED_APPS = (
     'evennia.comms',
     'evennia.help',
     'evennia.scripts',
+    'evennia.web.website',
     'evennia.web.webclient')
 # The user profile extends the User object with more functionality;
 # This should usually not be changed.

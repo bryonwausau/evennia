@@ -20,13 +20,13 @@ from mock import Mock
 from evennia.commands.default.cmdset_character import CharacterCmdSet
 from evennia.utils.test_resources import EvenniaTest
 from evennia.commands.default import help, general, system, admin, player, building, batchprocess, comms
-from evennia.utils import ansi
+from evennia.utils import ansi, utils
 from evennia.server.sessionhandler import SESSIONS
 
 
 # set up signal here since we are not starting the server
 
-_RE = re.compile(r"^\+|-+\+|\+-+|--*|\|", re.MULTILINE)
+_RE = re.compile(r"^\+|-+\+|\+-+|--*|\|(?:\s|$)", re.MULTILINE)
 
 
 # ------------------------------------------------------------
@@ -55,7 +55,6 @@ class CommandTest(EvenniaTest):
         cmdobj.cmdstring = cmdobj.key
         cmdobj.args = args
         cmdobj.cmdset = cmdset
-        cmdobj.sessid = 1
         cmdobj.session = SESSIONS.session_from_sessid(1)
         cmdobj.player = self.player
         cmdobj.raw_string = cmdobj.key + " " + args
@@ -68,9 +67,10 @@ class CommandTest(EvenniaTest):
             cmdobj.parse()
             cmdobj.func()
             cmdobj.at_post_cmd()
-            # clean out prettytable sugar
-            stored_msg = [args[0] for name, args, kwargs in receiver.msg.mock_calls]
-            returned_msg = "|".join(_RE.sub("", mess) for mess in stored_msg)
+            # clean out prettytable sugar. We only operate on text-type
+            stored_msg = [args[0] if args and args[0] else kwargs.get("text",utils.to_str(kwargs, force_string=True))
+                    for name, args, kwargs in receiver.msg.mock_calls]
+            returned_msg = "||".join(_RE.sub("", mess) for mess in stored_msg)
             returned_msg = ansi.parse_ansi(returned_msg, strip_ansi=noansi).strip()
             if msg is not None:
                 if msg == "" and returned_msg or not returned_msg.startswith(msg.strip()):
@@ -89,7 +89,7 @@ class CommandTest(EvenniaTest):
 
 class TestGeneral(CommandTest):
     def test_look(self):
-        self.call(general.CmdLook(), "here", "Room\nroom_desc")
+        self.call(general.CmdLook(), "here", "Room(#1)\nroom_desc")
 
     def test_home(self):
         self.call(general.CmdHome(), "", "You are already home")
@@ -101,9 +101,9 @@ class TestGeneral(CommandTest):
         self.call(general.CmdPose(), "looks around", "Char looks around")
 
     def test_nick(self):
-        self.call(general.CmdNick(), "testalias = testaliasedstring1", "Nick set:")
-        self.call(general.CmdNick(), "/player testalias = testaliasedstring2", "Nick set:")
-        self.call(general.CmdNick(), "/object testalias = testaliasedstring3", "Nick set:")
+        self.call(general.CmdNick(), "testalias = testaliasedstring1", "Nick 'testalias' mapped to 'testaliasedstring1'.")
+        self.call(general.CmdNick(), "/player testalias = testaliasedstring2", "Nick 'testalias' mapped to 'testaliasedstring2'.")
+        self.call(general.CmdNick(), "/object testalias = testaliasedstring3", "Nick 'testalias' mapped to 'testaliasedstring3'.")
         self.assertEqual(u"testaliasedstring1", self.char1.nicks.get("testalias"))
         self.assertEqual(u"testaliasedstring2", self.char1.nicks.get("testalias", category="player"))
         self.assertEqual(u"testaliasedstring3", self.char1.nicks.get("testalias", category="object"))
@@ -132,10 +132,10 @@ class TestSystem(CommandTest):
     def test_py(self):
         # we are not testing CmdReload, CmdReset and CmdShutdown, CmdService or CmdTime
         # since the server is not running during these tests.
-        self.call(system.CmdPy(), "1+2", ">>> 1+2|<<< 3")
+        self.call(system.CmdPy(), "1+2", ">>> 1+2|3")
 
     def test_scripts(self):
-        self.call(system.CmdScripts(), "", "dbref ")
+        self.call(system.CmdScripts(), "", "| dbref |")
 
     def test_objects(self):
         self.call(system.CmdObjects(), "", "Object subtype totals")
@@ -174,14 +174,14 @@ class TestPlayer(CommandTest):
         self.call(player.CmdOOC(), "", "You go OOC.", caller=self.player)
 
     def test_ic(self):
-        self.player.unpuppet_object(self.session.sessid)
+        self.player.unpuppet_object(self.session)
         self.call(player.CmdIC(), "Char", "You become Char.", caller=self.player, receiver=self.char1)
 
     def test_password(self):
         self.call(player.CmdPassword(), "testpassword = testpassword", "Password changed.", caller=self.player)
 
     def test_option(self):
-        self.call(player.CmdOption(), "", "Encoding:", caller=self.player)
+        self.call(player.CmdOption(), "", "Client settings", caller=self.player)
 
     def test_who(self):
         self.call(player.CmdWho(), "", "Players:", caller=self.player)
@@ -211,7 +211,7 @@ class TestBuilding(CommandTest):
         self.call(building.CmdExamine(), "Obj", "Name/key: Obj")
 
     def test_set_obj_alias(self):
-        self.call(building.CmdSetObjAlias(), "Obj = TestObj1b", "Alias(es) for 'Obj' set to testobj1b.")
+        self.call(building.CmdSetObjAlias(), "Obj = TestObj1b", "Alias(es) for 'Obj(#4)' set to testobj1b.")
 
     def test_copy(self):
         self.call(building.CmdCopy(), "Obj = TestObj2;TestObj2b, TestObj3;TestObj3b", "Copied Obj to 'TestObj3' (aliases: ['TestObj3b']")
@@ -227,7 +227,7 @@ class TestBuilding(CommandTest):
         self.call(building.CmdName(), "Obj2=Obj3", "Object's name changed to 'Obj3'.")
 
     def test_desc(self):
-        self.call(building.CmdDesc(), "Obj2=TestDesc", "The description was set on Obj2.")
+        self.call(building.CmdDesc(), "Obj2=TestDesc", "The description was set on Obj2(#5).")
 
     def test_wipe(self):
         self.call(building.CmdDestroy(), "Obj", "Obj was destroyed.")
@@ -263,7 +263,7 @@ class TestBuilding(CommandTest):
         self.call(building.CmdScript(), "Obj = scripts.Script", "Script scripts.Script successfully added")
 
     def test_teleport(self):
-        self.call(building.CmdTeleport(), "Room2", "Room2\n|Teleported to Room2.")
+        self.call(building.CmdTeleport(), "Room2", "Room2(#2)\n|Teleported to Room2.")
 
 
 class TestComms(CommandTest):
@@ -309,5 +309,5 @@ class TestBatchProcess(CommandTest):
     def test_batch_commands(self):
         # cannot test batchcode here, it must run inside the server process
         self.call(batchprocess.CmdBatchCommands(), "example_batch_cmds", "Running Batchcommand processor  Automatic mode for example_batch_cmds")
-        #self.call(batchprocess.CmdBatchCode(), "examples.batch_code", "")
-
+        # we make sure to delete the button again here to stop the running reactor
+        self.call(building.CmdDestroy(), "button", "button was destroyed.")

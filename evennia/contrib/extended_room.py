@@ -66,6 +66,7 @@ Installation/testing:
 3) Use `@desc` and `@detail` to customize the room, then play around!
 
 """
+from __future__ import division
 
 import re
 from django.conf import settings
@@ -286,7 +287,10 @@ class CmdExtendedLook(default_cmds.CmdLook):
         caller = self.caller
         args = self.args
         if args:
-            looking_at_obj = caller.search(args, use_nicks=True, quiet=True)
+            looking_at_obj = caller.search(args,
+                                           candidates=caller.location.contents + caller.contents,
+                                           use_nicks=True,
+                                           quiet=True)
             if not looking_at_obj:
                 # no object found. Check if there is a matching
                 # detail at location.
@@ -298,7 +302,7 @@ class CmdExtendedLook(default_cmds.CmdLook):
                         caller.msg(detail)
                         return
                 # no detail found. Trigger delayed error messages
-                _AT_SEARCH_RESULT(caller, args, looking_at_obj, False)
+                _AT_SEARCH_RESULT(looking_at_obj, caller, args, quiet=False)
                 return
             else:
                 # we need to extract the match manually.
@@ -377,6 +381,9 @@ class CmdExtendedDesc(default_cmds.CmdDesc):
             if not location:
                 caller.msg("No location to detail!")
                 return
+            if location.db.details is None:
+                caller.msg("|rThis location does not support details.|n")
+                return
             if self.switches and self.switches[0] in 'del':
                 # removing a detail.
                 if self.lhs in location.db.details:
@@ -386,9 +393,9 @@ class CmdExtendedDesc(default_cmds.CmdDesc):
                 return
             if not self.args:
                 # No args given. Return all details on location
-                string = "{wDetails on %s{n:\n" % location
-                string += "\n".join(" {w%s{n: %s" % (key, utils.crop(text)) for key, text in location.db.details.items())
-                caller.msg(string)
+                string = "|wDetails on %s|n:" % location
+                details = "\n".join(" |w%s|n: %s" % (key, utils.crop(text)) for key, text in location.db.details.items())
+                caller.msg("%s\n%s" % (string, details) if details else "%s None." % string)
                 return
             if not self.rhs:
                 # no '=' used - list content of given detail
@@ -452,6 +459,7 @@ class CmdExtendedDesc(default_cmds.CmdDesc):
                 obj.db.desc = text # a compatibility fallback
                 if obj.attributes.has("general_desc"):
                     obj.db.general_desc = text
+                    self.reset_times(obj)
                     caller.msg("General description was set on %s." % obj.key)
                 else:
                     # this is not an ExtendedRoom.

@@ -9,6 +9,7 @@ used for storing Aliases and Permissions. This module contains the
 respective handlers.
 
 """
+from builtins import object
 
 from django.conf import settings
 from django.db import models
@@ -29,12 +30,12 @@ class Tag(models.Model):
     any number of tags, stored via its db_tags property.  Tagging
     similar objects will make it easier to quickly locate the group
     later (such as when implementing zones). The main advantage of
-    tagging as opposed to using Attributes is speed; a tag is very
+    tagging as opposed to using tags is speed; a tag is very
     limited in what data it can hold, and the tag key+category is
     indexed for efficient lookup in the database. Tags are shared
     between objects - a new tag is only created if the key+category
     combination did not previously exist, making them unsuitable for
-    storing object-related data (for this a full Attribute should be
+    storing object-related data (for this a full tag should be
     used).
 
     The 'db_data' field is intended as a documentation field for the
@@ -57,17 +58,17 @@ class Tag(models.Model):
     # this is None, alias or permission
     db_tagtype = models.CharField('tagtype', max_length=16, null=True, help_text="overall type of Tag", db_index=True)
 
-    class Meta:
+    class Meta(object):
         "Define Django meta options"
         verbose_name = "Tag"
         unique_together = (('db_key', 'db_category', 'db_tagtype'),)
         index_together = (('db_key', 'db_category', 'db_tagtype'),)
 
     def __unicode__(self):
-        return u"%s" % self.db_key
+        return u"<Tag: %s>" % self.db_key
 
     def __str__(self):
-        return str(self.db_key)
+        return str("<Tag: %s>" % self.db_key)
 
 
 #
@@ -95,19 +96,129 @@ class TagHandler(object):
         self.obj = obj
         self._objid = obj.id
         self._model = obj.__dbclass__.__name__.lower()
-        self._cache = None
+        self._cache = {}
+        # store category names fully cached
+        self._catcache = {}
+        # full cache was run on all tags
+        self._cache_complete = False
 
-    def _recache(self):
-        """
-        Cache all tags of this object.
-
-        """
+    def _fullcache(self):
+        "Cache all tags of this object"
         query = {"%s__id" % self._model : self._objid,
                  "tag__db_tagtype" : self._tagtype}
-        tagobjs = [conn.tag for conn in getattr(self.obj, self._m2m_fieldname).through.objects.filter(**query)]
-        self._cache = dict(("%s-%s" % (to_str(tagobj.db_key).lower(),
-                                       tagobj.db_category.lower() if tagobj.db_category else None),
-                            tagobj) for tagobj in tagobjs)
+        tags = [conn.tag for conn in getattr(self.obj, self._m2m_fieldname).through.objects.filter(**query)]
+        self._cache = dict(("%s-%s" % (to_str(tag.db_key).lower(),
+                                       tag.db_category.lower() if tag.db_category else None),
+                            tag) for tag in tags)
+        self._cache_complete = True
+
+    def _getcache(self, key=None, category=None):
+        """
+        Retrieve from cache or database (always caches)
+
+        Args:
+            key (str, optional): Tag key to query for
+            category (str, optional): Tag category
+
+        Returns:
+            args (list): Returns a list of zero or more matches
+                found from cache or database.
+        Notes:
+            When given a category only, a search for all objects
+            of that category is done and a the category *name* is is
+            stored. This tells the system on subsequent calls that the
+            list of cached tags of this category is up-to-date
+            and that the cache can be queried for category matches
+            without missing any.
+            The TYPECLASS_AGGRESSIVE_CACHE=False setting will turn off
+            caching, causing each tag access to trigger a
+            database lookup.
+
+        """
+        key = key.strip().lower() if key else None
+        category = category.strip().lower() if category else None
+        if key:
+            cachekey = "%s-%s" % (key, category)
+            tag = _TYPECLASS_AGGRESSIVE_CACHE and self._cache.get(cachekey, None)
+            if tag:
+                return [tag]  # return cached entity
+            else:
+                query = {"%s__id" % self._model : self._objid,
+                         "tag__db_tagtype" : self._tagtype,
+                         "tag__db_key__iexact" : key.lower(),
+                         "tag__db_category__iexact" : category.lower() if category else None}
+                conn = getattr(self.obj, self._m2m_fieldname).through.objects.filter(**query)
+                if conn:
+                    tag = conn[0].tag
+                    self._cache[cachekey] = tag
+                    return [tag]
+        else:
+            # only category given (even if it's None) - we can't
+            # assume the cache to be complete unless we have queried
+            # for this category before
+            catkey = "-%s" % category
+            if _TYPECLASS_AGGRESSIVE_CACHE and catkey in self._catcache:
+                return [tag for key, tag in self._cache.items() if key.endswith(catkey)]
+            else:
+                # we have to query to make this category up-date in the cache
+                query = {"%s__id" % self._model : self._objid,
+                         "tag__db_tagtype" : self._tagtype,
+                         "tag__db_category__iexact" : category.lower() if category else None}
+                tags = [conn.tag for conn in getattr(self.obj,
+                            self._m2m_fieldname).through.objects.filter(**query)]
+                for tag in tags:
+                    cachekey = "%s-%s" % (tag.db_key, category)
+                    self._cache[cachekey] = tag
+                # mark category cache as up-to-date
+                self._catcache[catkey] = True
+                return tags
+        return []
+
+    def _setcache(self, key, category, tag_obj):
+        """
+        Update cache.
+
+        Args:
+            key (str): A cleaned key string
+            category (str or None): A cleaned category name
+            tag_obj (tag): The newly saved tag
+
+        """
+        if not key: # don't allow an empty key in cache
+            return
+        cachekey = "%s-%s" % (key, category)
+        catkey = "-%s" % category
+        self._cache[cachekey] = tag_obj
+        # mark that the category cache is no longer up-to-date
+        self._catcache.pop(catkey, None)
+        self._cache_complete = False
+
+    def _delcache(self, key, category):
+        """
+        Remove tag from cache
+
+        Args:
+            key (str): A cleaned key string
+            category (str or None): A cleaned category name
+
+        """
+        catkey = "-%s" % category
+        if key:
+            cachekey = "%s-%s" % (key, category)
+            self._cache.pop(cachekey, None)
+        else:
+            [self._cache.pop(key, None) for key in self._cache if key.endswith(catkey)]
+        # mark that the category cache is no longer up-to-date
+        self._catcache.pop(catkey, None)
+        self._cache_complete = False
+
+    def reset_cache(self):
+        """
+        Reset the cache from the outside.
+        """
+        self._cache_complete = False
+        self._cache = {}
+        self._catcache = {}
 
     def add(self, tag=None, category=None, data=None):
         """
@@ -141,17 +252,15 @@ class TagHandler(object):
             tagobj = self.obj.__class__.objects.create_tag(key=tagstr, category=category, data=data,
                                             tagtype=self._tagtype)
             getattr(self.obj, self._m2m_fieldname).add(tagobj)
-            if self._cache is None:
-                self._recache()
-            cachestring = "%s-%s" % (tagstr, category)
-            self._cache[cachestring] = tagobj
+            self._setcache(tagstr, category, tagobj)
 
-    def get(self, key, category=None, return_tagobj=False):
+    def get(self, key=None, default=None, category=None, return_tagobj=False):
         """
         Get the tag for the given key or list of tags.
 
         Args:
             key (str or list): The tag or tags to retrieve.
+            default (any, optional): The value to return in case of no match.
             category (str, optional): The Tag category to limit the
                 request to. Note that `None` is the valid, default
                 category.
@@ -164,14 +273,11 @@ class TagHandler(object):
                 depending on `return_tagobj`.
 
         """
-        if self._cache is None or not _TYPECLASS_AGGRESSIVE_CACHE:
-            self._recache()
         ret = []
-        category = category.strip().lower() if category is not None else None
-        searchkey = ["%s-%s" % (key.strip().lower(), category) if key is not None else None for key in make_iter(key)]
-        ret = [val for val in (self._cache.get(keystr) for keystr in searchkey) if val]
-        ret = [to_str(tag.db_data) for tag in ret] if return_tagobj else ret
-        return ret[0] if len(ret) == 1 else ret
+        for keystr in make_iter(key):
+            ret.extend([tag if return_tagobj else tag.db_key
+                            for tag in self._getcache(key, category)])
+        return ret[0] if len(ret) == 1 else (ret if ret else default)
 
     def remove(self, key, category=None):
         """
@@ -195,7 +301,7 @@ class TagHandler(object):
             tagobj = self.obj.db_tags.filter(db_key=tagstr, db_category=category)
             if tagobj:
                 getattr(self.obj, self._m2m_fieldname).remove(tagobj[0])
-        self._recache()
+            self._delcache(key, category)
 
     def clear(self, category=None):
         """
@@ -211,7 +317,9 @@ class TagHandler(object):
             getattr(self.obj, self._m2m_fieldname).clear()
         else:
             getattr(self.obj, self._m2m_fieldname).filter(db_category=category).delete()
-        self._recache()
+        self._cache = {}
+        self._catcache = {}
+        self._cache_complete = False
 
     def all(self, category=None, return_key_and_category=False):
         """
@@ -230,21 +338,14 @@ class TagHandler(object):
                 `return_key_and_category` is set.
 
         """
-        if self._cache is None or not _TYPECLASS_AGGRESSIVE_CACHE:
-            self._recache()
-        if category:
-            category = category.strip().lower() if category is not None else None
-            matches = [tag for tag in self._cache.values() if tag.db_category == category]
-        else:
-            matches = self._cache.values()
-
-        if matches:
-            matches = sorted(matches, key=lambda o: o.id)
-            if return_key_and_category:
+        if not self._cache_complete:
+            self._fullcache()
+        tags = sorted(self._getcache(None, category), key=lambda o:o.id)
+        if return_key_and_category:
                 # return tuple (key, category)
-                return [(to_str(p.db_key), to_str(p.db_category)) for p in matches]
-            else:
-                return [to_str(p.db_key) for p in matches]
+            return [(to_str(tag.db_key), to_str(tag.db_category)) for tag in tags]
+        else:
+            return [to_str(tag.db_key) for tag in tags]
         return []
 
     def __str__(self):

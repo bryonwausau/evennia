@@ -8,6 +8,8 @@ Config values should usually be set through the
 manager's conf() method.
 
 """
+from builtins import object
+
 try:
     import cPickle as pickle
 except ImportError:
@@ -88,7 +90,7 @@ class ServerConfig(WeakSharedMemoryModel):
         "Setter. Allows for self.value = value"
         if utils.has_parent('django.db.models.base.Model', value):
             # we have to protect against storing db objects.
-            logger.log_errmsg("ServerConfig cannot store db objects! (%s)" % value)
+            logger.log_err("ServerConfig cannot store db objects! (%s)" % value)
             return
         self.db_value = pickle.dumps(value)
         self.save()
@@ -99,7 +101,7 @@ class ServerConfig(WeakSharedMemoryModel):
         self.delete()
     value = property(__value_get, __value_set, __value_del)
 
-    class Meta:
+    class Meta(object):
         "Define Django meta options"
         verbose_name = "Server Config value"
         verbose_name_plural = "Server Config values"

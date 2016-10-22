@@ -13,6 +13,7 @@ Attributes are separate objects that store values persistently onto
 the database object. Like everything else, they can be accessed
 transparently through the decorating TypeClass.
 """
+from builtins import object
 
 from django.conf import settings
 from django.db import models
@@ -51,7 +52,7 @@ class ContentsHandler(object):
 
         """
         self._pkcache.update(dict((obj.pk, None) for obj in
-                            ObjectDB.objects.filter(db_location=self.obj)))
+                            ObjectDB.objects.filter(db_location=self.obj) if obj.pk))
 
     def get(self, exclude=None):
         """
@@ -64,16 +65,22 @@ class ContentsHandler(object):
             objects (list): the Objects inside this location
 
         """
-        pks = self._pkcache.keys()
         if exclude:
-            pks = [pk for pk in pks if pk not in [excl.pk for excl in make_iter(exclude)]]
+            pks = [pk for pk in self._pkcache if pk not in [excl.pk for excl in make_iter(exclude)]]
+        else:
+            pks = self._pkcache
         try:
             return [self._idcache[pk] for pk in pks]
         except KeyError:
             # this can happen if the idmapper cache was cleared for an object
             # in the contents cache. If so we need to re-initialize and try again.
             self.init()
-            return self.get(exclude=exclude)
+            try:
+                return [self._idcache[pk] for pk in pks]
+            except KeyError:
+                # this means an actual failure of caching. Return real database match.
+                logger.log_err("contents cache failed for %s." % (self.obj.key))
+                return list(ObjectDB.objects.filter(db_location=self.obj))
 
     def add(self, obj):
         """
@@ -101,7 +108,7 @@ class ContentsHandler(object):
 
         """
         self._pkcache = {}
-        self._init()
+        self.init()
 
 #------------------------------------------------------------
 #
@@ -265,12 +272,10 @@ class ObjectDB(TypedObject):
 
         except RuntimeError:
             errmsg = "Error: %s.location = %s creates a location loop." % (self.key, location)
-            logger.log_errmsg(errmsg)
-            raise #RuntimeError(errmsg)
-        except Exception, e:
+            raise RuntimeError(errmsg)
+        except Exception as e:
             errmsg = "Error (%s): %s is not a valid location." % (str(e), location)
-            logger.log_errmsg(errmsg)
-            raise #Exception(errmsg)
+            raise RuntimeError(errmsg)
 
     def __location_del(self):
         "Cleanly delete the location reference"
@@ -302,7 +307,7 @@ class ObjectDB(TypedObject):
                 logger.log_warn("db_location direct save triggered contents_cache.init() for all objects!")
                 [o.contents_cache.init() for o in self.__dbclass__.get_all_cached_instances()]
 
-    class Meta:
+    class Meta(object):
         "Define Django meta options"
         verbose_name = "Object"
         verbose_name_plural = "Objects"
